@@ -1,0 +1,6 @@
+{
+	"title": "Sample New Animation",
+	"description": "Demonstrates how to add a new animation asset to the game via the JJK Mod Kit. Place replacement or additional animation assets inside the Animations subfolder.",
+	"version": "v1",
+	"priority": 0
+}

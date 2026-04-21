@@ -19,12 +19,11 @@ Binaries/
 Binaries/Win64/
 Intermediate/
 
-Content/
 # Only allow .uasset and .umap files from /Content dir.
 # They're tracked by git-lfs, don't forget to track other
 # files if adding them here.
-!/Content/Mods/*
-!/Content/ModKit/*
+!/Content/Mods/**
+!/Content/ModKit/**
 # Allow Python scripts in Content/Python/ (mod tooling, not LFS).
 !/Content/Python/*.py
 # ACL Plugin is needed in this path

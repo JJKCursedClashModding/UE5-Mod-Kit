@@ -1,0 +1,6 @@
+{
+	"title": "Sample New Blueprint",
+	"description": "Demonstrates how to add or replace a Blueprint asset (CP_010_70_BP) via the JJK Mod Kit. Use this as a starting point for character or gameplay Blueprint mods.",
+	"version": "v1",
+	"priority": 0
+}

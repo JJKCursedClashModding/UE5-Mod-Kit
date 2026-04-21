@@ -1,0 +1,6 @@
+{
+	"title": "Sample New Textures",
+	"description": "Demonstrates how to replace or add UI and character textures (T_UI_Test) via the JJK Mod Kit. Use this as a starting point for texture/skin mods.",
+	"version": "v1",
+	"priority": 0
+}
