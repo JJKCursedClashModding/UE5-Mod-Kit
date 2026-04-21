@@ -1,0 +1,5 @@
+#include "AbramsSequencerSetUMGNiagaraBoolParameterEvaluate.h"
+
+FAbramsSequencerSetUMGNiagaraBoolParameterEvaluate::FAbramsSequencerSetUMGNiagaraBoolParameterEvaluate() {
+}
+

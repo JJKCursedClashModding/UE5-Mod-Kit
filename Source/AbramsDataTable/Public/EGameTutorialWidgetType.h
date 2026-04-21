@@ -1,0 +1,48 @@
+#pragma once
+#include "CoreMinimal.h"
+#include "EGameTutorialWidgetType.generated.h"
+
+UENUM(BlueprintType)
+enum class EGameTutorialWidgetType : uint8 {
+    None,
+    Move,
+    Dash,
+    Jump,
+    NormalAttack,
+    Target,
+    CursedEnergyAttack,
+    CursedLevel,
+    AutoCombo,
+    Guard,
+    Step,
+    Review,
+    Operation,
+    LinkCombo,
+    TabCombo,
+    SuperCursedEnergyAttack,
+    DomainExpansion,
+    Story,
+    StoryMissionSelect,
+    StoryMissionSelectCorrelationDiagram,
+    StoryCorrelationDiagram,
+    VsPlayer,
+    VsEnemy,
+    VsEnemyRisk,
+    VsEnemyEquipment,
+    VsEnemyGrowth,
+    VsEnemyBindingVows,
+    VsEnemyInterval,
+    FreeBattle,
+    Lobby,
+    VisualLobbyHost,
+    VisualLobby,
+    Shop,
+    Customize,
+    StoryDlcChapter,
+    Arcade,
+    VsEnemyExtraMission,
+    VsEnemyExtraMissionHelp,
+    Adapt,
+    Invalid = 255,
+};
+

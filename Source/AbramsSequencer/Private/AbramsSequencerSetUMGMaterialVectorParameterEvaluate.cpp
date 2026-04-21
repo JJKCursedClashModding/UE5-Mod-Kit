@@ -1,0 +1,5 @@
+#include "AbramsSequencerSetUMGMaterialVectorParameterEvaluate.h"
+
+FAbramsSequencerSetUMGMaterialVectorParameterEvaluate::FAbramsSequencerSetUMGMaterialVectorParameterEvaluate() {
+}
+

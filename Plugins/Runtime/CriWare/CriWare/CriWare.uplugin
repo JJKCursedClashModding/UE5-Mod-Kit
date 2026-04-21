@@ -1,0 +1,18 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "CriWare Runtime (Stub)",
+	"Description": "Minimal stub for CRI Middleware ADX2/Mana. Replace with the licensed CriWare UE Plugin for full audio/video functionality.",
+	"Category": "Audio",
+	"EnabledByDefault": true,
+	"CanContainContent": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "CriWareRuntime",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}

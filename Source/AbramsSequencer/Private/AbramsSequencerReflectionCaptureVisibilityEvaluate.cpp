@@ -1,0 +1,5 @@
+#include "AbramsSequencerReflectionCaptureVisibilityEvaluate.h"
+
+FAbramsSequencerReflectionCaptureVisibilityEvaluate::FAbramsSequencerReflectionCaptureVisibilityEvaluate() {
+}
+

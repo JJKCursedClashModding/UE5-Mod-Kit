@@ -1,0 +1,6 @@
+#include "AbramsSequencerSetEffectMaterialVectorParameterTrack.h"
+
+UAbramsSequencerSetEffectMaterialVectorParameterTrack::UAbramsSequencerSetEffectMaterialVectorParameterTrack() {
+}
+
+

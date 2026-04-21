@@ -1,0 +1,5 @@
+#include "AbramsSequencerCharacterAndWeaponVisibilityEvaluate.h"
+
+FAbramsSequencerCharacterAndWeaponVisibilityEvaluate::FAbramsSequencerCharacterAndWeaponVisibilityEvaluate() {
+}
+

@@ -1,0 +1,6 @@
+#include "AbramsSequencerFacialParts_BlendMouthAnimationModule.h"
+
+UAbramsSequencerFacialParts_BlendMouthAnimationModule::UAbramsSequencerFacialParts_BlendMouthAnimationModule() {
+}
+
+

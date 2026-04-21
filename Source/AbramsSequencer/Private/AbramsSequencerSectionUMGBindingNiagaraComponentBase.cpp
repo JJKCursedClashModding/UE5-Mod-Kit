@@ -1,0 +1,6 @@
+#include "AbramsSequencerSectionUMGBindingNiagaraComponentBase.h"
+
+UAbramsSequencerSectionUMGBindingNiagaraComponentBase::UAbramsSequencerSectionUMGBindingNiagaraComponentBase() {
+}
+
+

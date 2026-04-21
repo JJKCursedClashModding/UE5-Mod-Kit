@@ -1,0 +1,5 @@
+#include "AbramsSequencerStoryDemoBackgroundFadeParameterEvaluate.h"
+
+FAbramsSequencerStoryDemoBackgroundFadeParameterEvaluate::FAbramsSequencerStoryDemoBackgroundFadeParameterEvaluate() {
+}
+

@@ -1,0 +1,5 @@
+#include "AbramsSequencerSetUMGNiagaraColorParameterEvaluate.h"
+
+FAbramsSequencerSetUMGNiagaraColorParameterEvaluate::FAbramsSequencerSetUMGNiagaraColorParameterEvaluate() {
+}
+

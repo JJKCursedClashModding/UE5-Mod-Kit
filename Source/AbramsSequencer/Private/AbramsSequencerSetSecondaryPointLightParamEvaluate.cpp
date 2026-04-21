@@ -1,0 +1,5 @@
+#include "AbramsSequencerSetSecondaryPointLightParamEvaluate.h"
+
+FAbramsSequencerSetSecondaryPointLightParamEvaluate::FAbramsSequencerSetSecondaryPointLightParamEvaluate() {
+}
+

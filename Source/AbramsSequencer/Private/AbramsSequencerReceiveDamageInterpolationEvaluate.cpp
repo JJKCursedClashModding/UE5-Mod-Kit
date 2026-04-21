@@ -1,0 +1,5 @@
+#include "AbramsSequencerReceiveDamageInterpolationEvaluate.h"
+
+FAbramsSequencerReceiveDamageInterpolationEvaluate::FAbramsSequencerReceiveDamageInterpolationEvaluate() {
+}
+

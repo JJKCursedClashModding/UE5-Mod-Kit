@@ -1,0 +1,6 @@
+#include "AbramsSequencerSetFacialParts_MouthParameterSection.h"
+
+UAbramsSequencerSetFacialParts_MouthParameterSection::UAbramsSequencerSetFacialParts_MouthParameterSection() {
+}
+
+

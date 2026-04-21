@@ -1,0 +1,5 @@
+#include "AbramsSequencerImpactShakePositionDemoImageEvaluate.h"
+
+FAbramsSequencerImpactShakePositionDemoImageEvaluate::FAbramsSequencerImpactShakePositionDemoImageEvaluate() {
+}
+

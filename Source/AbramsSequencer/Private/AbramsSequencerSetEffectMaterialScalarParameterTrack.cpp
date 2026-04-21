@@ -1,0 +1,6 @@
+#include "AbramsSequencerSetEffectMaterialScalarParameterTrack.h"
+
+UAbramsSequencerSetEffectMaterialScalarParameterTrack::UAbramsSequencerSetEffectMaterialScalarParameterTrack() {
+}
+
+

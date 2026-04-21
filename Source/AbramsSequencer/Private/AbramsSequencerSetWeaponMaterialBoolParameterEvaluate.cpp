@@ -1,0 +1,5 @@
+#include "AbramsSequencerSetWeaponMaterialBoolParameterEvaluate.h"
+
+FAbramsSequencerSetWeaponMaterialBoolParameterEvaluate::FAbramsSequencerSetWeaponMaterialBoolParameterEvaluate() {
+}
+

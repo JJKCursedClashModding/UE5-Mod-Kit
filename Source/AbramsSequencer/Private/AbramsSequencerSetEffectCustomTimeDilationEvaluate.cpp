@@ -1,0 +1,5 @@
+#include "AbramsSequencerSetEffectCustomTimeDilationEvaluate.h"
+
+FAbramsSequencerSetEffectCustomTimeDilationEvaluate::FAbramsSequencerSetEffectCustomTimeDilationEvaluate() {
+}
+

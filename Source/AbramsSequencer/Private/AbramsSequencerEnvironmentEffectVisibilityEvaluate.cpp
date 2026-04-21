@@ -1,0 +1,5 @@
+#include "AbramsSequencerEnvironmentEffectVisibilityEvaluate.h"
+
+FAbramsSequencerEnvironmentEffectVisibilityEvaluate::FAbramsSequencerEnvironmentEffectVisibilityEvaluate() {
+}
+

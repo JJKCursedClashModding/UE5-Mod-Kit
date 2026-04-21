@@ -1,0 +1,18 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "CosmosWebApi (Stub)",
+	"Description": "Minimal stub for Bandai Namco's proprietary online backend. No public SDK available.",
+	"Category": "Other",
+	"EnabledByDefault": true,
+	"CanContainContent": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "CosmosWebApi",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}

@@ -1,0 +1,5 @@
+#include "AbramsSequencerSetUMGNiagaraFloatParameterEvaluate.h"
+
+FAbramsSequencerSetUMGNiagaraFloatParameterEvaluate::FAbramsSequencerSetUMGNiagaraFloatParameterEvaluate() {
+}
+

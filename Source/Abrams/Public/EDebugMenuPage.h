@@ -1,0 +1,46 @@
+#pragma once
+#include "CoreMinimal.h"
+#include "EDebugMenuPage.generated.h"
+
+UENUM(BlueprintType)
+enum class EDebugMenuPage : uint8 {
+    Top,
+    System,
+    Map,
+    Battle1,
+    Battle2,
+    Camera,
+    Character,
+    Sound,
+    SoundSeTest,
+    SoundVoiceTest,
+    UI,
+    Sequencer,
+    Rendering1,
+    Rendering2,
+    Performance,
+    Asset,
+    BattleTest,
+    PvP,
+    PvE,
+    PvEMission,
+    PvEMissionWave,
+    PvEBindingVows,
+    PvEAI,
+    Arcade,
+    ArcadeAI,
+    AI,
+    Network,
+    NetworkRanking,
+    NetworkAging,
+    Script,
+    SaveData,
+    Story,
+    StoryDemo,
+    StoryRoom,
+    User1,
+    User2,
+    Dlc,
+    Max,
+};
+

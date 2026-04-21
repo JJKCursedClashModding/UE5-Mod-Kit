@@ -1,0 +1,5 @@
+#include "AbramsSequencerSetOverrideMaterialInstanceEvaluate.h"
+
+FAbramsSequencerSetOverrideMaterialInstanceEvaluate::FAbramsSequencerSetOverrideMaterialInstanceEvaluate() {
+}
+

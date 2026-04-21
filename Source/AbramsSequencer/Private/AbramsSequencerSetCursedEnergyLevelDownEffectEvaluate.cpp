@@ -1,0 +1,5 @@
+#include "AbramsSequencerSetCursedEnergyLevelDownEffectEvaluate.h"
+
+FAbramsSequencerSetCursedEnergyLevelDownEffectEvaluate::FAbramsSequencerSetCursedEnergyLevelDownEffectEvaluate() {
+}
+

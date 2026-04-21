@@ -1,0 +1,6 @@
+#include "AbramsSequencerStoryDemoBackgroundFadeParameterTrack.h"
+
+UAbramsSequencerStoryDemoBackgroundFadeParameterTrack::UAbramsSequencerStoryDemoBackgroundFadeParameterTrack() {
+}
+
+

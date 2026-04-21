@@ -1,0 +1,5 @@
+#include "AbramsSequencerSetUMGNiagaraVectorParameterEvaluate.h"
+
+FAbramsSequencerSetUMGNiagaraVectorParameterEvaluate::FAbramsSequencerSetUMGNiagaraVectorParameterEvaluate() {
+}
+

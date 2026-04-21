@@ -1,0 +1,5 @@
+#include "AbramsSequencerSetEffectMaterialBoolParameterEvaluate.h"
+
+FAbramsSequencerSetEffectMaterialBoolParameterEvaluate::FAbramsSequencerSetEffectMaterialBoolParameterEvaluate() {
+}
+

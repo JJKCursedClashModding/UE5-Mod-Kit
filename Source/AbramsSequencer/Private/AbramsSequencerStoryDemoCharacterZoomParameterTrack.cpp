@@ -1,0 +1,6 @@
+#include "AbramsSequencerStoryDemoCharacterZoomParameterTrack.h"
+
+UAbramsSequencerStoryDemoCharacterZoomParameterTrack::UAbramsSequencerStoryDemoCharacterZoomParameterTrack() {
+}
+
+

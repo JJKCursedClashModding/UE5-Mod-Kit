@@ -1,0 +1,5 @@
+#include "AbramsSequencerExponentialHeightFogVisibilityEvaluate.h"
+
+FAbramsSequencerExponentialHeightFogVisibilityEvaluate::FAbramsSequencerExponentialHeightFogVisibilityEvaluate() {
+}
+

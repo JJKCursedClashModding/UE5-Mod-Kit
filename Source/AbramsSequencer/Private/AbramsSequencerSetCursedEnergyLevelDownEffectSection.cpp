@@ -1,0 +1,6 @@
+#include "AbramsSequencerSetCursedEnergyLevelDownEffectSection.h"
+
+UAbramsSequencerSetCursedEnergyLevelDownEffectSection::UAbramsSequencerSetCursedEnergyLevelDownEffectSection() {
+}
+
+

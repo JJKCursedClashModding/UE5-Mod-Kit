@@ -1,0 +1,6 @@
+#include "AbramsSequencerSetWeaponMaterialVectorParameterTrack.h"
+
+UAbramsSequencerSetWeaponMaterialVectorParameterTrack::UAbramsSequencerSetWeaponMaterialVectorParameterTrack() {
+}
+
+

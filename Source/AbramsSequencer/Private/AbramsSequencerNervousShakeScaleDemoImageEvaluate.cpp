@@ -1,0 +1,5 @@
+#include "AbramsSequencerNervousShakeScaleDemoImageEvaluate.h"
+
+FAbramsSequencerNervousShakeScaleDemoImageEvaluate::FAbramsSequencerNervousShakeScaleDemoImageEvaluate() {
+}
+

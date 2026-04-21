@@ -1,0 +1,6 @@
+#include "AbramsSequencerExponentialHeightFogVisibilitySection.h"
+
+UAbramsSequencerExponentialHeightFogVisibilitySection::UAbramsSequencerExponentialHeightFogVisibilitySection() {
+}
+
+

@@ -1,0 +1,6 @@
+#include "AbramsSequencerSetUMGMaterialTextureParameterFromNameTrack.h"
+
+UAbramsSequencerSetUMGMaterialTextureParameterFromNameTrack::UAbramsSequencerSetUMGMaterialTextureParameterFromNameTrack() {
+}
+
+
