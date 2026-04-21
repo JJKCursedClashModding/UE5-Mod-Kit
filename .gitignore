@@ -27,7 +27,7 @@ Intermediate/
 # Allow Python scripts in Content/Python/ (mod tooling, not LFS).
 !/Content/Python/*.py
 # ACL Plugin is needed in this path
-!/Content/Editor/ACLPlugin
+!/Content/Editor/ACLPlugin/**
 
 # Allow any files from /RawContent dir.
 # Any file in /RawContent dir will be managed by git lfs.
