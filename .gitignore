@@ -34,6 +34,9 @@ Content/
 # Any file in /RawContent dir will be managed by git lfs.
 !/RawContent/**/*
 
+!README.md
+!build.ps1
+
 # OS/platform generated files.
 
 # Windows
