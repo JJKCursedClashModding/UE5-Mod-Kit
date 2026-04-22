@@ -1,4 +1,4 @@
-# JujutsuKaisenCC — UE 5.1
+# Jujutsu Kaisen Cursed Clash Mod Kit — UE 5.1
 
 ## Requirements
 
