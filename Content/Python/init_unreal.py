@@ -307,6 +307,34 @@ def _register_jjkcc_menu():
     )
     jjk_menu.add_menu_entry("ModCooking", entry_cook_all)
 
+    entry_cook_modded = unreal.ToolMenuEntry(
+        name            = "CookModdedGameAssets",
+        type            = unreal.MultiBlockType.MENU_ENTRY,
+        insert_position = unreal.ToolMenuInsert("", unreal.ToolMenuInsertType.DEFAULT),
+    )
+    entry_cook_modded.set_label("Cook Modded Game Assets")
+    entry_cook_modded.set_tool_tip(
+        "Cook and stage individual game assets that live inside\n"
+        "DirectoriesToNeverCook directories (replacement assets).\n\n"
+        "Assets are taken from the 'Core Packages to Cook' list in:\n"
+        "  Edit → Project Settings → Plugins → JJK Mod Kit\n\n"
+        "Add assets to the list by right-clicking them in the\n"
+        "Content Browser → JJK Mod Kit → Add to Core Packages to Cook…\n\n"
+        "Each package is cooked in isolation (bypassing NeverCook) then\n"
+        "copied to:\n"
+        "  <game mods path>/<mod folder>/assets/<relative path under /Game>"
+    )
+    entry_cook_modded.set_string_command(
+        type        = unreal.ToolMenuStringCommandType.PYTHON,
+        custom_type = unreal.Name(""),
+        string      = (
+            "import importlib, mod_tools; "
+            "importlib.reload(mod_tools); "
+            "mod_tools.cook_modded_game_assets()"
+        ),
+    )
+    jjk_menu.add_menu_entry("ModCooking", entry_cook_modded)
+
     entry_settings = unreal.ToolMenuEntry(
         name            = "ModKitSettings",
         type            = unreal.MultiBlockType.MENU_ENTRY,
@@ -993,6 +1021,170 @@ except Exception as _edit_manifest_err:
     _JJK_EDIT_MANIFEST_SCRIPT_OK  = False
 
 
+# ─── Add / Remove from Core Packages to Cook — asset right-click ─────────────
+#
+# get_label() is called at MENU-DRAW time.  We inspect the first selected asset
+# against the live CorePackagesToCook CDO list so the label correctly reflects
+# the current state ("Add…" vs "Remove…").
+#
+# execute() uses PySide2.QInputDialog (bundled with UE5) to let the user pick
+# which mod when multiple mods exist.  Falls back to a plain EditorDialog when
+# PySide2 is unavailable.
+
+try:
+    @unreal.uclass()
+    class _JJKCorePackagesEntry(unreal.ToolMenuEntryScript):
+        """
+        Asset context-menu entry: 'Add to Core Packages to Cook…' / 'Remove from Core Packages to Cook'
+
+        Visible for any non-empty asset selection.
+        Label is context-sensitive: shows "Remove…" when the first selected
+        asset is already in any mod's CorePackagesToCook list, "Add…" otherwise.
+        """
+
+        @unreal.ufunction(override=True)
+        def is_visible(self, context: unreal.ToolMenuContext) -> bool:
+            try:
+                selected = unreal.EditorUtilityLibrary.get_selected_assets()
+            except Exception:
+                return False
+            return bool(selected)
+
+        @unreal.ufunction(override=True)
+        def get_label(self, context: unreal.ToolMenuContext) -> str:
+            try:
+                import mod_tools
+                selected = unreal.EditorUtilityLibrary.get_selected_assets()
+                if not selected:
+                    return "Add to Core Packages to Cook…"
+                first_pkg = selected[0].get_path_name().split(".")[0]
+                for entry in mod_tools.get_core_packages_to_cook():
+                    if first_pkg in entry["package_paths"]:
+                        return f"Remove from Core Packages to Cook [{entry['mod_name']}]"
+            except Exception:
+                pass
+            return "Add to Core Packages to Cook…"
+
+        @unreal.ufunction(override=True)
+        def get_tool_tip(self, context: unreal.ToolMenuContext) -> str:
+            return (
+                "Add or remove the selected asset(s) from the\n"
+                "'Core Packages to Cook' list.\n\n"
+                "Assets in this list are cooked and staged by:\n"
+                "  JJK Mod Kit → Cook Modded Game Assets\n\n"
+                "This cook bypasses DirectoriesToNeverCook so it works for\n"
+                "replacement assets that live in game content directories."
+            )
+
+        @unreal.ufunction(override=True)
+        def execute(self, context: unreal.ToolMenuContext) -> None:
+            import importlib, mod_tools
+            importlib.reload(mod_tools)
+
+            selected = unreal.EditorUtilityLibrary.get_selected_assets()
+            if not selected:
+                return
+
+            # Collect package paths (strip .AssetName object suffix)
+            pkg_paths = [a.get_path_name().split(".")[0] for a in selected]
+            first_pkg = pkg_paths[0]
+
+            # ── Remove mode: first asset is already in a mod's list ───────────
+            all_entries = mod_tools.get_core_packages_to_cook()
+            found_mod = None
+            for entry in all_entries:
+                if first_pkg in entry["package_paths"]:
+                    found_mod = entry["mod_name"]
+                    break
+
+            if found_mod is not None:
+                ok = mod_tools.remove_from_core_packages(found_mod, pkg_paths)
+                if ok:
+                    unreal.EditorDialog.show_message(
+                        title        = "Core Packages to Cook",
+                        message      = (
+                            f"Removed {len(pkg_paths)} asset(s) from '{found_mod}'.\n\n"
+                            f"Assets removed:\n"
+                            + "\n".join(f"  • {p}" for p in pkg_paths[:10])
+                            + (f"\n  … and {len(pkg_paths)-10} more" if len(pkg_paths) > 10 else "")
+                        ),
+                        message_type  = unreal.AppMsgType.OK,
+                        default_value = unreal.AppReturnType.OK,
+                    )
+                return
+
+            # ── Add mode: pick a mod, then add ───────────────────────────────
+            from pathlib import Path
+            mods_dir   = mod_tools._get_content_mods_dir()
+            mod_names  = (
+                [d.name for d in sorted(mods_dir.iterdir()) if d.is_dir()]
+                if mods_dir.exists() else []
+            )
+
+            if not mod_names:
+                unreal.EditorDialog.show_message(
+                    title        = "Core Packages to Cook",
+                    message      = (
+                        "No mods found under Content/Mods/.\n\n"
+                        "Create a mod first via JJK Mod Kit → New Mod."
+                    ),
+                    message_type  = unreal.AppMsgType.OK,
+                    default_value = unreal.AppReturnType.OK,
+                )
+                return
+
+            if len(mod_names) == 1:
+                chosen_mod = mod_names[0]
+            else:
+                # Prefer PySide2 item-picker (bundled with UE 5.x)
+                chosen_mod = None
+                try:
+                    from PySide2.QtWidgets import QApplication, QInputDialog
+                    _app = QApplication.instance() or QApplication([])
+                    item, ok = QInputDialog.getItem(
+                        None,
+                        "Add to Core Packages to Cook",
+                        f"Select mod to add {len(pkg_paths)} asset(s) to:",
+                        mod_names, 0, False,
+                    )
+                    if ok and item:
+                        chosen_mod = item
+                except Exception as _qt_err:
+                    unreal.log_warning(
+                        f"[JJK Mod Kit] PySide2 picker failed ({_qt_err}); "
+                        "falling back to first mod."
+                    )
+                    chosen_mod = mod_names[0]
+
+                if not chosen_mod:
+                    return   # User cancelled the Qt dialog
+
+            ok = mod_tools.add_to_core_packages(chosen_mod, pkg_paths)
+            if ok:
+                unreal.EditorDialog.show_message(
+                    title        = "Core Packages to Cook",
+                    message      = (
+                        f"Added {len(pkg_paths)} asset(s) to '{chosen_mod}'.\n\n"
+                        + "\n".join(f"  • {p}" for p in pkg_paths[:10])
+                        + (f"\n  … and {len(pkg_paths)-10} more" if len(pkg_paths) > 10 else "")
+                        + "\n\nRun  JJK Mod Kit → Cook Modded Game Assets  to cook and stage them."
+                    ),
+                    message_type  = unreal.AppMsgType.OK,
+                    default_value = unreal.AppReturnType.OK,
+                )
+
+    _jjk_core_packages_script = _JJKCorePackagesEntry()
+    _JJK_CORE_PACKAGES_OK     = True
+    unreal.log("[JJK Mod Kit] 'Add/Remove from Core Packages to Cook' ToolMenuEntryScript registered.")
+
+except Exception as _e:
+    unreal.log_warning(
+        f"[JJK Mod Kit] 'Add/Remove from Core Packages to Cook' script unavailable ({_e})."
+    )
+    _jjk_core_packages_script = None
+    _JJK_CORE_PACKAGES_OK     = False
+
+
 def _register_content_browser_context_menus():
     """
     Add 'JJK Mod Kit' sections to the Content Browser right-click menus:
@@ -1161,6 +1353,22 @@ def _register_content_browser_context_menus():
         else:
             unreal.log_warning(
                 "[JJK Mod Kit] 'Toggle cooked asset name' entry skipped "
+                "(ToolMenuEntryScript not available)."
+            )
+
+        # ── Add / Remove from Core Packages to Cook ───────────────────────────
+        if _JJK_CORE_PACKAGES_OK:
+            e = unreal.ToolMenuEntry(
+                name            = "JJKCorePackagesToCook",
+                type            = unreal.MultiBlockType.MENU_ENTRY,
+                insert_position = unreal.ToolMenuInsert("", unreal.ToolMenuInsertType.DEFAULT),
+            )
+            e.script_object = _jjk_core_packages_script
+            asset_menu.add_menu_entry("JJKModKitAsset", e)
+            unreal.log("[JJK Mod Kit] Registered 'Add/Remove from Core Packages to Cook' in ContentBrowser.AssetContextMenu.")
+        else:
+            unreal.log_warning(
+                "[JJK Mod Kit] 'Add/Remove from Core Packages to Cook' entry skipped "
                 "(ToolMenuEntryScript not available)."
             )
     else:

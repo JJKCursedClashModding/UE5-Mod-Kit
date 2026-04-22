@@ -983,6 +983,333 @@ def cook_and_stage_all_mods_async() -> None:
         pass
 
 
+# ─── Core Packages to Cook ───────────────────────────────────────────────────
+
+def get_core_packages_to_cook() -> list:
+    """
+    Return CorePackagesToCook from the UJJKModKitSettings CDO as a list of dicts:
+        [{"mod_name": "MyMod", "package_paths": ["/Game/...", ...]}, ...]
+    Returns [] when called outside the Unreal Editor.
+    """
+    cdo = _get_settings_cdo()
+    if cdo is None:
+        return []
+    try:
+        result = []
+        for entry in cdo.core_packages_to_cook:
+            result.append({
+                "mod_name":      str(entry.mod_name),
+                "package_paths": [str(p) for p in entry.package_paths],
+            })
+        return result
+    except Exception as e:
+        _log_error(f"get_core_packages_to_cook: {e}")
+        return []
+
+
+def _cook_core_packages_for_mod(mod_name: str, package_paths: list) -> int:
+    """
+    Cook *package_paths* using the per-asset NeverCook-bypass technique:
+      -cooksinglepackagenorefs
+      -ini: to clear DirectoriesToNeverCook and disable bCookAll
+
+    Returns 0 on success, 1 on non-fatal warnings, >1 on hard failure.
+    """
+    if not package_paths:
+        _log(f"[JJK Core Cook] {mod_name}: no packages to cook — skipping.")
+        return 0
+
+    try:
+        ue_cmd       = _get_ue_editor_cmd()
+        project_file = _get_project_file()
+        project_root = _get_project_root()
+    except RuntimeError as e:
+        _log_error(str(e))
+        return 1
+
+    # Join multiple packages with '+' (cook commandlet GetSwitchValueElements splits on '+')
+    pkg_arg = "+".join(package_paths)
+
+    cmd = [
+        str(ue_cmd),
+        str(project_file),
+        "-run=Cook",
+        "-TargetPlatform=Windows",
+        f"-PACKAGE={pkg_arg}",
+        "-cooksinglepackagenorefs",
+        # Clear NeverCook block-list for this process only (file never written)
+        "-ini:Game:[/Script/UnrealEd.ProjectPackagingSettings]:!DirectoriesToNeverCook=()",
+        # Prevent bCookAll=True (from DefaultGame.ini) from sweeping all content
+        "-ini:Game:[/Script/UnrealEd.ProjectPackagingSettings]:bCookAll=False",
+        "-Unversioned",
+        "-NoLogTimes",
+        "-NoSplash",
+        "-Unattended",
+        "-NullRHI",
+        "-stdout",
+    ]
+
+    log_file = project_root / "log_core_cook.txt"
+    _log(f"[JJK Core Cook] {mod_name}: cooking {len(package_paths)} package(s)…")
+    _log("Command: " + " ".join(f'"{a}"' if " " in a else a for a in cmd))
+    _log(f"Log → {log_file}")
+
+    with open(log_file, "w", encoding="utf-8") as log_f:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(project_root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        for line in proc.stdout:
+            stripped = line.rstrip()
+            if stripped:
+                print(f"[JJK Core Cook] {stripped}")
+            log_f.write(line)
+        proc.wait()
+        rc = proc.returncode
+
+    if rc == 0:
+        _log("[JJK Core Cook] Cook succeeded.")
+    elif rc == 1:
+        _log(f"[JJK Core Cook] Cook finished with warnings (exit 1) — check {log_file}.")
+    else:
+        _log_error(f"[JJK Core Cook] Cook failed (exit {rc}) — see {log_file}.")
+    return rc
+
+
+def _stage_core_packages(mod_name: str, package_paths: list) -> int:
+    """
+    Copy cooked output for *package_paths* to:
+        <game_mods_path>/<mod_name>/assets/<path relative to /Game>
+
+    For /Game/Characters/CP_010/AM_Foo the cooked file is at:
+        Saved/Cooked/Windows/.../Content/Characters/CP_010/AM_Foo.uasset
+    and is staged to:
+        <game_mods_path>/<mod_name>/assets/Characters/CP_010/AM_Foo.uasset
+
+    Returns the number of files copied, or -1 on unrecoverable error.
+    """
+    cooked_content = _get_cooked_dir() / "Content"
+    game_mods_path = _get_game_mods_path()
+    dest_assets    = game_mods_path / mod_name / "assets"
+
+    copied = 0
+    for pkg_path in package_paths:
+        # /Game/Characters/CP_010/AM_Foo → Characters/CP_010/AM_Foo
+        if not pkg_path.startswith("/Game/"):
+            _log(f"[JJK Core Cook] Skipping non-/Game/ path: {pkg_path}")
+            continue
+        rel        = pkg_path[len("/Game/"):]   # e.g.  Characters/CP_010/AM_Foo
+        rel_path   = Path(rel)
+        cooked_dir = cooked_content / rel_path.parent
+        base_name  = rel_path.name
+
+        if not cooked_dir.exists():
+            _log_error(f"[JJK Core Cook] Cooked directory not found: {cooked_dir}")
+            continue
+
+        # Collect all files produced for this package (.uasset, .uexp, .ubulk, …)
+        matched = list(cooked_dir.glob(f"{base_name}.*"))
+        if not matched:
+            _log_error(
+                f"[JJK Core Cook] No cooked files found for  {pkg_path}  "
+                f"in  {cooked_dir}"
+            )
+            continue
+
+        for src in matched:
+            dst = dest_assets / rel_path.parent / src.name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            _log(f"[JJK Core Cook]   {src.name}  →  {dst}")
+            copied += 1
+
+    return copied
+
+
+def cook_modded_game_assets() -> None:
+    """
+    Cook and stage all assets listed in the 'Core Packages to Cook' setting.
+
+    For each mod entry in CorePackagesToCook:
+      1. Cooks the listed packages in isolation, bypassing DirectoriesToNeverCook.
+      2. Copies cooked files to:
+             <game_mods_path>/<mod_name>/assets/<relative path under /Game>
+
+    Configure the list via:
+        Edit → Project Settings → Plugins → JJK Mod Kit → Core Packages to Cook
+    or right-click any asset → JJK Mod Kit → Add to Core Packages to Cook…
+    """
+    entries = get_core_packages_to_cook()
+    if not entries:
+        try:
+            import unreal
+            unreal.EditorDialog.show_message(
+                title        = "Cook Modded Game Assets",
+                message      = (
+                    "No core packages are configured.\n\n"
+                    "Add assets via:\n"
+                    "  Right-click an asset → JJK Mod Kit → Add to Core Packages to Cook…\n\n"
+                    "or edit:\n"
+                    "  Edit → Project Settings → Plugins → JJK Mod Kit"
+                    " → Core Packages to Cook"
+                ),
+                message_type  = unreal.AppMsgType.OK,
+                default_value = unreal.AppReturnType.OK,
+            )
+        except Exception:
+            _log("[JJK Core Cook] No core packages configured.")
+        return
+
+    total_staged = 0
+    errors: list = []
+
+    for entry in entries:
+        mod_name      = entry["mod_name"]
+        package_paths = entry["package_paths"]
+        if not mod_name or not package_paths:
+            continue
+
+        rc = _cook_core_packages_for_mod(mod_name, package_paths)
+        if rc > 1:
+            errors.append(f"{mod_name}: cook failed (exit {rc})")
+            continue
+
+        staged = _stage_core_packages(mod_name, package_paths)
+        if staged < 0:
+            errors.append(f"{mod_name}: staging failed")
+        else:
+            total_staged += staged
+            _log(f"[JJK Core Cook] ✓ {mod_name}: staged {staged} file(s)")
+
+    # Summary dialog
+    try:
+        import unreal
+        if errors:
+            msg = (
+                f"Cook & Stage completed with {len(errors)} error(s):\n"
+                + "\n".join(f"  • {e}" for e in errors)
+                + f"\n\nSuccessfully staged {total_staged} file(s) total."
+            )
+        else:
+            msg = f"Done. Staged {total_staged} file(s) total."
+        unreal.EditorDialog.show_message(
+            title        = "Cook Modded Game Assets",
+            message      = msg,
+            message_type  = unreal.AppMsgType.OK,
+            default_value = unreal.AppReturnType.OK,
+        )
+    except Exception:
+        pass
+
+
+def add_to_core_packages(mod_name: str, package_paths: list) -> bool:
+    """
+    Add *package_paths* to the CorePackagesToCook entry for *mod_name*.
+    Creates the entry if it doesn't exist yet.
+
+    Returns True on success, False if the CDO is unavailable or an error occurs.
+    """
+    cdo = _get_settings_cdo()
+    if cdo is None:
+        _log_error("add_to_core_packages: CDO not available (not inside the editor).")
+        return False
+
+    try:
+        import unreal
+
+        # Read current list (returns value copies — we rebuild and set the whole array)
+        current = list(cdo.core_packages_to_cook)
+
+        found_idx = None
+        for i, entry in enumerate(current):
+            if str(entry.mod_name) == mod_name:
+                found_idx = i
+                break
+
+        if found_idx is not None:
+            existing = list(current[found_idx].package_paths)
+            for p in package_paths:
+                if p not in existing:
+                    existing.append(p)
+            new_entry = unreal.ModCorePackages()
+            new_entry.mod_name      = mod_name
+            new_entry.package_paths = existing
+            current[found_idx]      = new_entry
+        else:
+            new_entry = unreal.ModCorePackages()
+            new_entry.mod_name      = mod_name
+            new_entry.package_paths = list(package_paths)
+            current.append(new_entry)
+            current.sort(key=lambda e: str(e.mod_name))
+
+        cdo.set_editor_property("core_packages_to_cook", current)
+        try:
+            cdo.save_config()
+        except AttributeError:
+            pass   # save_config not always exposed; UE auto-saves on editor exit
+
+        unreal.log(
+            f"[JJK Mod Kit] Added {len(package_paths)} package(s) to "
+            f"CorePackagesToCook['{mod_name}']."
+        )
+        return True
+
+    except Exception as e:
+        _log_error(f"add_to_core_packages: {e}")
+        return False
+
+
+def remove_from_core_packages(mod_name: str, package_paths: list) -> bool:
+    """
+    Remove *package_paths* from the CorePackagesToCook entry for *mod_name*.
+    Drops the entire entry if the path list becomes empty.
+
+    Returns True on success.
+    """
+    cdo = _get_settings_cdo()
+    if cdo is None:
+        _log_error("remove_from_core_packages: CDO not available (not inside the editor).")
+        return False
+
+    try:
+        import unreal
+
+        remove_set = set(package_paths)
+        new_list   = []
+
+        for entry in cdo.core_packages_to_cook:
+            if str(entry.mod_name) == mod_name:
+                remaining = [p for p in entry.package_paths if str(p) not in remove_set]
+                if remaining:
+                    kept = unreal.ModCorePackages()
+                    kept.mod_name      = mod_name
+                    kept.package_paths = remaining
+                    new_list.append(kept)
+                # else: entry is now empty → omit it
+            else:
+                new_list.append(entry)
+
+        cdo.set_editor_property("core_packages_to_cook", new_list)
+        try:
+            cdo.save_config()
+        except AttributeError:
+            pass
+
+        unreal.log(
+            f"[JJK Mod Kit] Removed {len(package_paths)} package(s) from "
+            f"CorePackagesToCook['{mod_name}']."
+        )
+        return True
+
+    except Exception as e:
+        _log_error(f"remove_from_core_packages: {e}")
+        return False
+
+
 # ─── CLI entry point ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
