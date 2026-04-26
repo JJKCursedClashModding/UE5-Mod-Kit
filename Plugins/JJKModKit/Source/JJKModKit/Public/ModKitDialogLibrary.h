@@ -9,9 +9,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Indicates which button the user pressed in ShowModPickerDialog.
+ * Indicates which button the user pressed in ShowModPickerDialog /
+ * ShowModPickerDialogAdd.
  *
- * Python: unreal.ModPickerAction.EDIT / DELETE / CANCELLED
+ * Python: unreal.ModPickerAction.EDIT / DELETE / ADD / CANCELLED
  */
 UENUM(BlueprintType)
 enum class EModPickerAction : uint8
@@ -19,6 +20,7 @@ enum class EModPickerAction : uint8
     Cancelled   UMETA(DisplayName = "Cancelled"),
     Edit        UMETA(DisplayName = "Edit"),
     Delete      UMETA(DisplayName = "Delete"),
+    Add         UMETA(DisplayName = "Add"),
 };
 
 
@@ -128,13 +130,32 @@ public:
      * Actual file deletion is left to the caller (Python).
      *
      * @param ModNames   Mod folder names to display.
-     * @param OutChosen  Set to the selected name for OK and Delete actions.
+     * @param OutChosen  Set to the selected name for Edit and Delete actions.
      * @return           EModPickerAction indicating what the user chose.
      *
      * Python: action, chosen = unreal.ModKitDialogLibrary.show_mod_picker_dialog(names)
      */
     UFUNCTION(BlueprintCallable, Category = "JJK Mod Kit|Dialogs")
     static EModPickerAction ShowModPickerDialog(
+        const TArray<FString>& ModNames,
+        FString& OutChosen
+    );
+
+    /**
+     * Show a listbox dialog in "Add" mode — two buttons: Add and Cancel.
+     * No Delete button.  Used when selecting the target mod for an operation
+     * such as "Add to Core Packages to Cook".
+     *
+     * Double-clicking a row is equivalent to pressing Add.
+     *
+     * @param ModNames   Mod folder names to display.
+     * @param OutChosen  Set to the selected name when the user clicks Add.
+     * @return           EModPickerAction::Add if confirmed, Cancelled otherwise.
+     *
+     * Python: action, chosen = unreal.ModKitDialogLibrary.show_mod_picker_dialog_add(names)
+     */
+    UFUNCTION(BlueprintCallable, Category = "JJK Mod Kit|Dialogs")
+    static EModPickerAction ShowModPickerDialogAdd(
         const TArray<FString>& ModNames,
         FString& OutChosen
     );

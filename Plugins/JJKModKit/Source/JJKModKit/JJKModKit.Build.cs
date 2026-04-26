@@ -24,6 +24,7 @@ public class JJKModKit : ModuleRules
             "ToolMenus",         // FToolMenuContext — used as UFUNCTION parameter
             "TargetPlatform",    // ITargetPlatformModule, ITargetPlatformManagerModule — used by JJKModCooker
             "Settings",          // ISettingsModule::ShowViewer — open Project Settings panel
+            "PropertyEditor",    // FPropertyEditorModule — force-refresh details panels
             "AssetTools",        // IAssetTools::ImportAssetTasks — used by UncookLibrary
             "Slate",             // SWindow, SButton, SEditableTextBox, SSpinBox — mod manifest dialog
             "SlateCore",         // FSlateApplication::AddModalWindow, core widget types

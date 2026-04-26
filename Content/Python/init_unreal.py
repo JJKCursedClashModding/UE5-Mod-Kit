@@ -1027,9 +1027,9 @@ except Exception as _edit_manifest_err:
 # against the live CorePackagesToCook CDO list so the label correctly reflects
 # the current state ("Add…" vs "Remove…").
 #
-# execute() uses PySide2.QInputDialog (bundled with UE5) to let the user pick
-# which mod when multiple mods exist.  Falls back to a plain EditorDialog when
-# PySide2 is unavailable.
+# execute() uses new_mod_dialog.show_mod_picker_add() — the Add/Cancel variant
+# of the mod picker — to let the user choose which mod when multiple mods exist.
+# (The Edit Mod Manifest workflow uses show_mod_picker() with Delete/Edit/Cancel.)
 
 try:
     @unreal.uclass()
@@ -1133,31 +1133,12 @@ try:
                 )
                 return
 
-            if len(mod_names) == 1:
-                chosen_mod = mod_names[0]
-            else:
-                # Prefer PySide2 item-picker (bundled with UE 5.x)
-                chosen_mod = None
-                try:
-                    from PySide2.QtWidgets import QApplication, QInputDialog
-                    _app = QApplication.instance() or QApplication([])
-                    item, ok = QInputDialog.getItem(
-                        None,
-                        "Add to Core Packages to Cook",
-                        f"Select mod to add {len(pkg_paths)} asset(s) to:",
-                        mod_names, 0, False,
-                    )
-                    if ok and item:
-                        chosen_mod = item
-                except Exception as _qt_err:
-                    unreal.log_warning(
-                        f"[JJK Mod Kit] PySide2 picker failed ({_qt_err}); "
-                        "falling back to first mod."
-                    )
-                    chosen_mod = mod_names[0]
-
-                if not chosen_mod:
-                    return   # User cancelled the Qt dialog
+            # Show the Add/Cancel picker (no Delete or Edit buttons)
+            import importlib as _il, new_mod_dialog as _nmd
+            _il.reload(_nmd)
+            _action, chosen_mod = _nmd.show_mod_picker_add(mod_names)
+            if _action != "add" or not chosen_mod:
+                return  # User cancelled
 
             ok = mod_tools.add_to_core_packages(chosen_mod, pkg_paths)
             if ok:

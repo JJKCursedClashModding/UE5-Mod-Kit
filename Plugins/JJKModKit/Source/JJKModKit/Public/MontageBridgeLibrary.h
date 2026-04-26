@@ -116,4 +116,22 @@ public:
      */
     UFUNCTION(BlueprintCallable, Category = "JJK Mod Kit|Debug")
     static void DumpMontageDebugInfo(UAnimMontage* Montage);
+
+    /**
+     * Force the Project Settings "JJK Mod Kit" panel to reflect the latest
+     * values in Config/DefaultGame.ini immediately, without restarting the editor.
+     *
+     * Steps:
+     *   1. Reads Config/DefaultGame.ini from disk (bypassing the in-memory
+     *      merged config cache) and applies the parsed values directly to the CDO.
+     *   2. Broadcasts a property-change event for CorePackagesToCook.
+     *   3. Asks the PropertyEditor module to refresh details views.
+     *
+     * Called from Python after add_to_core_packages() / remove_from_core_packages()
+     * so that the panel is live-updated without a restart.
+     *
+     * Python: unreal.MontageBridgeLibrary.refresh_mod_kit_settings()
+     */
+    UFUNCTION(BlueprintCallable, Category = "JJK Mod Kit|Editor")
+    static void RefreshModKitSettings();
 };

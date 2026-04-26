@@ -324,6 +324,60 @@ def show_mod_picker(mod_names: list[str]) -> tuple[str | None, str | None]:
         return None, None
 
 
+def show_mod_picker_add(mod_names: list[str]) -> tuple[str | None, str | None]:
+    """
+    Show a listbox in "Add" mode — two buttons: **Add** and **Cancel**.
+
+    Used when the caller needs the user to choose a target mod without
+    offering delete or edit actions (e.g. "Add to Core Packages to Cook").
+
+    Double-clicking a row is equivalent to pressing Add.
+
+    Parameters
+    ----------
+    mod_names : list[str]
+        Mod folder names to display in the listbox.
+
+    Returns
+    -------
+    (action, chosen_name)
+      action      = "add" | None (cancelled / error)
+      chosen_name = mod folder name, or None
+    """
+    try:
+        lib = _get_lib()
+    except RuntimeError as exc:
+        _log_error(str(exc))
+        return None, None
+
+    if not hasattr(lib, "show_mod_picker_dialog_add"):
+        _log_error(
+            "[JJK Mod Kit] show_mod_picker_add: "
+            "show_mod_picker_dialog_add is not available.\n"
+            "Please recompile the JJKModKit plugin and restart the editor:\n"
+            "  Close the editor → run build.ps1  (or use Ctrl+Alt+F11 for Live Coding)"
+        )
+        _ue_show_message(
+            "Plugin Recompile Required",
+            "show_mod_picker_dialog_add is not available.\n\n"
+            "Please recompile the JJKModKit plugin and restart the editor:\n\n"
+            "  1. Close the editor\n"
+            "  2. Run build.ps1\n"
+            "  3. Reopen the editor\n\n"
+            "(Or use Ctrl+Alt+F11 for Live Coding while the editor is open.)",
+            "error",
+        )
+        return None, None
+
+    import unreal
+    action_enum, chosen = lib.show_mod_picker_dialog_add(mod_names)
+
+    if action_enum == unreal.ModPickerAction.ADD:
+        return "add", str(chosen)
+    else:
+        return None, None
+
+
 def delete_mod(mod_name: str) -> bool:
     """
     Delete the mod folder *mod_name* from Content/Mods/.

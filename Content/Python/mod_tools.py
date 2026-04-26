@@ -274,6 +274,57 @@ def open_edit_manifest_dialog(mod_folder_path: str = "") -> bool:
     return new_mod_dialog.show_edit_dialog(mod_folder_path)
 
 
+def open_add_to_core_packages_dialog(package_paths: list) -> bool:
+    """
+    Show the "Add" mod picker so the user can choose which mod to add
+    *package_paths* to in CorePackagesToCook.
+
+    The dialog shows two buttons — **Add** and **Cancel** — with no Delete
+    or Edit options, making it clear that the action is non-destructive.
+
+    Parameters
+    ----------
+    package_paths : list[str]
+        One or more UE package paths to add (e.g.
+        ["/Game/Characters/CP_010/AM_SomeAttack_01"]).
+
+    Returns True if the packages were registered, False if cancelled or an
+    error occurred.
+
+    Typical call sites
+    ------------------
+    * Content Browser right-click → JJK Mod Kit → Add to Core Packages to Cook…
+    * Python: mod_tools.open_add_to_core_packages_dialog(["/Game/Foo/Bar"])
+    """
+    if not package_paths:
+        _log_error("open_add_to_core_packages_dialog: package_paths must not be empty.")
+        return False
+
+    import importlib
+    import new_mod_dialog
+    importlib.reload(new_mod_dialog)
+
+    mods_dir = _get_content_mods_dir()
+    if not mods_dir.exists():
+        _log_error("open_add_to_core_packages_dialog: Content/Mods/ does not exist yet.")
+        return False
+
+    mod_names = [d.name for d in sorted(mods_dir.iterdir()) if d.is_dir()]
+    if not mod_names:
+        _log_error("open_add_to_core_packages_dialog: No mods found under Content/Mods/.")
+        return False
+
+    # If there is only one mod, skip the picker and add directly.
+    if len(mod_names) == 1:
+        chosen = mod_names[0]
+    else:
+        action, chosen = new_mod_dialog.show_mod_picker_add(mod_names)
+        if action != "add" or not chosen:
+            return False
+
+    return add_to_core_packages(chosen, package_paths)
+
+
 # ─── ORIGINAL_ tag batch operations ──────────────────────────────────────────
 
 def _find_original_assets() -> list:
@@ -984,27 +1035,151 @@ def cook_and_stage_all_mods_async() -> None:
 
 
 # ─── Core Packages to Cook ───────────────────────────────────────────────────
+#
+# Settings are stored in Config/DefaultGame.ini under
+#   [/Script/JJKModKit.JJKModKitSettings]
+# and read/written directly from Python to stay immune to Live Coding CDO issues.
+
+_GAME_INI_SECTION = "/Script/JJKModKit.JJKModKitSettings"
+_CORE_PKG_KEY     = "CorePackagesToCook"
+
+
+def _game_ini_path() -> Path:
+    return _get_project_root() / "Config" / "DefaultGame.ini"
+
+
+def _parse_core_pkg_value(value: str) -> dict:
+    """
+    Parse  (ModName="MyMod",PackagePaths=("/Game/Foo","/Game/Bar"))
+    and return {"mod_name": "MyMod", "package_paths": ["/Game/Foo", "/Game/Bar"]}.
+    Returns {"mod_name": "", "package_paths": []} on parse failure.
+    """
+    import re
+    mn = re.search(r'ModName="([^"]*)"', value)
+    if not mn:
+        return {"mod_name": "", "package_paths": []}
+    mod_name = mn.group(1)
+
+    paths: list = []
+    pm = re.search(r'PackagePaths=\(([^)]*)\)', value)
+    if pm:
+        raw = pm.group(1).strip()
+        if raw:
+            paths = [p.strip().strip('"') for p in raw.split(',') if p.strip().strip('"')]
+
+    return {"mod_name": mod_name, "package_paths": paths}
+
+
+def _format_core_pkg_line(mod_name: str, package_paths: list) -> str:
+    """Format a +CorePackagesToCook=(...) ini line (with newline)."""
+    paths_str = ",".join(f'"{p}"' for p in package_paths) if package_paths else ""
+    return f'+{_CORE_PKG_KEY}=(ModName="{mod_name}",PackagePaths=({paths_str}))\n'
+
+
+def _ini_read_core_packages() -> list:
+    """
+    Read all CorePackagesToCook entries from [/Script/JJKModKit.JJKModKitSettings]
+    in Config/DefaultGame.ini.  Entries with empty ModName are skipped.
+    Returns [{"mod_name": ..., "package_paths": [...]}, ...].
+    """
+    ini_path = _game_ini_path()
+    if not ini_path.exists():
+        return []
+    try:
+        with open(ini_path, "r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+
+        in_section = False
+        result: list = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("["):
+                in_section = (stripped == f"[{_GAME_INI_SECTION}]")
+                continue
+            if in_section and stripped.startswith(f"+{_CORE_PKG_KEY}="):
+                value = stripped[len(f"+{_CORE_PKG_KEY}="):]
+                entry = _parse_core_pkg_value(value)
+                if entry["mod_name"]:   # skip empty-name entries
+                    result.append(entry)
+        return result
+    except Exception as e:
+        _log_error(f"_ini_read_core_packages: {e}")
+        return []
+
+
+def _ini_write_core_packages(entries: list, *, sync_cdo: bool = True) -> bool:
+    """
+    Write CorePackagesToCook entries to [/Script/JJKModKit.JJKModKitSettings].
+    Replaces all existing +CorePackagesToCook= lines in that section only;
+    all other sections (including any LIVECODING_* sections) are left untouched.
+    """
+    ini_path = _game_ini_path()
+    try:
+        lines: list = ini_path.read_text(encoding="utf-8").splitlines(keepends=True) if ini_path.exists() else []
+
+        in_target   = False
+        section_found   = False
+        inserted        = False
+        new_lines: list = []
+
+        for line in lines:
+            stripped = line.strip()
+
+            if stripped.startswith("["):
+                if in_target and not inserted:
+                    # We've reached the NEXT section — flush new entries first
+                    for e in entries:
+                        if e["mod_name"] and e["package_paths"]:
+                            new_lines.append(_format_core_pkg_line(e["mod_name"], e["package_paths"]))
+                    inserted = True
+                in_target = (stripped == f"[{_GAME_INI_SECTION}]")
+                if in_target:
+                    section_found = True
+                new_lines.append(line)
+                continue
+
+            # Skip existing CorePackagesToCook lines in our target section
+            if in_target and stripped.startswith(f"+{_CORE_PKG_KEY}="):
+                continue
+
+            new_lines.append(line)
+
+        # Target section was the last section in the file
+        if in_target and not inserted:
+            for e in entries:
+                if e["mod_name"] and e["package_paths"]:
+                    new_lines.append(_format_core_pkg_line(e["mod_name"], e["package_paths"]))
+            inserted = True
+
+        # Target section doesn't exist yet — append it
+        if not section_found:
+            if new_lines and new_lines[-1].strip():
+                new_lines.append("\n")
+            new_lines.append(f"[{_GAME_INI_SECTION}]\n")
+            for e in entries:
+                if e["mod_name"] and e["package_paths"]:
+                    new_lines.append(_format_core_pkg_line(e["mod_name"], e["package_paths"]))
+
+        ini_path.write_text("".join(new_lines), encoding="utf-8")
+
+        # Keep the in-memory settings CDO synced after every write.
+        if sync_cdo:
+            _sync_cdo_from_ini()
+        return True
+
+    except Exception as e:
+        _log_error(f"_ini_write_core_packages: {e}")
+        return False
+
 
 def get_core_packages_to_cook() -> list:
     """
-    Return CorePackagesToCook from the UJJKModKitSettings CDO as a list of dicts:
+    Return CorePackagesToCook as a list of dicts:
         [{"mod_name": "MyMod", "package_paths": ["/Game/...", ...]}, ...]
-    Returns [] when called outside the Unreal Editor.
+    Reads directly from Config/DefaultGame.ini for reliability (immune to
+    Live Coding CDO issues).
     """
-    cdo = _get_settings_cdo()
-    if cdo is None:
-        return []
-    try:
-        result = []
-        for entry in cdo.core_packages_to_cook:
-            result.append({
-                "mod_name":      str(entry.mod_name),
-                "package_paths": [str(p) for p in entry.package_paths],
-            })
-        return result
-    except Exception as e:
-        _log_error(f"get_core_packages_to_cook: {e}")
-        return []
+    return _ini_read_core_packages()
 
 
 def _cook_core_packages_for_mod(mod_name: str, package_paths: list) -> int:
@@ -1206,108 +1381,112 @@ def cook_modded_game_assets() -> None:
         pass
 
 
+def _sync_cdo_from_ini() -> None:
+    """
+    Re-read DefaultGame.ini into the UJJKModKitSettings CDO so that the
+    Project Settings panel reflects the changes immediately.
+
+    Strategy
+    --------
+    1. Best-effort: invoke the C++ bridge for editor-side refresh hooks.
+    2. Authoritative: always rebuild the CDO array from DefaultGame.ini in Python.
+    """
+    # ── Best-effort C++ bridge ────────────────────────────────────────────────
+    try:
+        import unreal
+        bridge = getattr(unreal, "MontageBridgeLibrary", None)
+        if bridge is not None and hasattr(bridge, "refresh_mod_kit_settings"):
+            bridge.refresh_mod_kit_settings()
+            _log("[JJK Mod Kit] RefreshModKitSettings() invoked.")
+        else:
+            _log("[JJK Mod Kit] _sync_cdo_from_ini: RefreshModKitSettings not available "
+                 "(plugin needs recompile) — continuing with Python CDO sync.")
+    except Exception as e:
+        _log(f"[JJK Mod Kit] _sync_cdo_from_ini: RefreshModKitSettings raised {e} "
+             f"— continuing with Python CDO sync.")
+
+    # ── Authoritative sync: rebuild CDO array from INI ───────────────────────
+    cdo = _get_settings_cdo()
+    if cdo is not None:
+        try:
+            import unreal
+            entries  = _ini_read_core_packages()
+            new_list = []
+            for entry in entries:
+                obj               = unreal.ModCorePackages()
+                obj.mod_name      = entry["mod_name"]
+                obj.package_paths = entry["package_paths"]
+                new_list.append(obj)
+            cdo.set_editor_property("core_packages_to_cook", new_list)
+            _log(f"[JJK Mod Kit] CDO synced from INI: {len(new_list)} mod entr(y/ies).")
+            return
+        except Exception as e:
+            _log(f"[JJK Mod Kit] _sync_cdo_from_ini: Python CDO sync failed: {e} "
+                 f"(Settings may refresh on next editor restart)")
+
+
 def add_to_core_packages(mod_name: str, package_paths: list) -> bool:
     """
     Add *package_paths* to the CorePackagesToCook entry for *mod_name*.
     Creates the entry if it doesn't exist yet.
-
-    Returns True on success, False if the CDO is unavailable or an error occurs.
+    Writes directly to Config/DefaultGame.ini (immune to Live Coding CDO issues),
+    then syncs the in-memory CDO so the Project Settings panel updates immediately.
+    Returns True on success.
     """
-    cdo = _get_settings_cdo()
-    if cdo is None:
-        _log_error("add_to_core_packages: CDO not available (not inside the editor).")
+    if not mod_name or not package_paths:
+        _log_error("add_to_core_packages: mod_name and package_paths must not be empty.")
         return False
 
-    try:
-        import unreal
-
-        # Read current list (returns value copies — we rebuild and set the whole array)
-        current = list(cdo.core_packages_to_cook)
-
-        found_idx = None
-        for i, entry in enumerate(current):
-            if str(entry.mod_name) == mod_name:
-                found_idx = i
-                break
-
-        if found_idx is not None:
-            existing = list(current[found_idx].package_paths)
+    entries = _ini_read_core_packages()
+    found = False
+    for entry in entries:
+        if entry["mod_name"] == mod_name:
             for p in package_paths:
-                if p not in existing:
-                    existing.append(p)
-            new_entry = unreal.ModCorePackages()
-            new_entry.mod_name      = mod_name
-            new_entry.package_paths = existing
-            current[found_idx]      = new_entry
-        else:
-            new_entry = unreal.ModCorePackages()
-            new_entry.mod_name      = mod_name
-            new_entry.package_paths = list(package_paths)
-            current.append(new_entry)
-            current.sort(key=lambda e: str(e.mod_name))
+                if p not in entry["package_paths"]:
+                    entry["package_paths"].append(p)
+            found = True
+            break
+    if not found:
+        entries.append({"mod_name": mod_name, "package_paths": list(package_paths)})
+        entries.sort(key=lambda e: e["mod_name"])
 
-        cdo.set_editor_property("core_packages_to_cook", current)
-        try:
-            cdo.save_config()
-        except AttributeError:
-            pass   # save_config not always exposed; UE auto-saves on editor exit
-
-        unreal.log(
+    ok = _ini_write_core_packages(entries, sync_cdo=True)
+    if ok:
+        _log(
             f"[JJK Mod Kit] Added {len(package_paths)} package(s) to "
-            f"CorePackagesToCook['{mod_name}']."
+            f"CorePackagesToCook['{mod_name}'] in DefaultGame.ini."
         )
-        return True
-
-    except Exception as e:
-        _log_error(f"add_to_core_packages: {e}")
-        return False
+    return ok
 
 
 def remove_from_core_packages(mod_name: str, package_paths: list) -> bool:
     """
     Remove *package_paths* from the CorePackagesToCook entry for *mod_name*.
     Drops the entire entry if the path list becomes empty.
-
+    Writes directly to Config/DefaultGame.ini (immune to Live Coding CDO issues),
+    then syncs the in-memory CDO so the Project Settings panel updates immediately.
     Returns True on success.
     """
-    cdo = _get_settings_cdo()
-    if cdo is None:
-        _log_error("remove_from_core_packages: CDO not available (not inside the editor).")
-        return False
+    entries    = _ini_read_core_packages()
+    remove_set = set(package_paths)
+    new_entries: list = []
 
-    try:
-        import unreal
+    for entry in entries:
+        if entry["mod_name"] == mod_name:
+            remaining = [p for p in entry["package_paths"] if p not in remove_set]
+            if remaining:
+                new_entries.append({"mod_name": mod_name, "package_paths": remaining})
+            # else: all paths removed — drop the whole entry
+        else:
+            new_entries.append(entry)
 
-        remove_set = set(package_paths)
-        new_list   = []
-
-        for entry in cdo.core_packages_to_cook:
-            if str(entry.mod_name) == mod_name:
-                remaining = [p for p in entry.package_paths if str(p) not in remove_set]
-                if remaining:
-                    kept = unreal.ModCorePackages()
-                    kept.mod_name      = mod_name
-                    kept.package_paths = remaining
-                    new_list.append(kept)
-                # else: entry is now empty → omit it
-            else:
-                new_list.append(entry)
-
-        cdo.set_editor_property("core_packages_to_cook", new_list)
-        try:
-            cdo.save_config()
-        except AttributeError:
-            pass
-
-        unreal.log(
+    ok = _ini_write_core_packages(new_entries, sync_cdo=True)
+    if ok:
+        _log(
             f"[JJK Mod Kit] Removed {len(package_paths)} package(s) from "
-            f"CorePackagesToCook['{mod_name}']."
+            f"CorePackagesToCook['{mod_name}'] in DefaultGame.ini."
         )
-        return True
-
-    except Exception as e:
-        _log_error(f"remove_from_core_packages: {e}")
-        return False
+    return ok
 
 
 # ─── CLI entry point ─────────────────────────────────────────────────────────

@@ -340,14 +340,28 @@ class SModPickerDialog : public SCompoundWidget
 public:
     SLATE_BEGIN_ARGS(SModPickerDialog)
         : _ModNames()
+        , _bAddMode(false)
     {}
         SLATE_ARGUMENT(TArray<FString>, ModNames)
+        /** When true: shows Add + Cancel only (no Delete button). */
+        SLATE_ARGUMENT(bool, bAddMode)
     SLATE_END_ARGS()
 
     void Construct(const FArguments& InArgs)
     {
+        bAddMode = InArgs._bAddMode;
+
         for (const FString& Name : InArgs._ModNames)
             Items.Add(MakeShared<FString>(Name));
+
+        // Button labels / visibility depend on mode
+        const FText OkLabel = bAddMode
+            ? FText::FromString(TEXT("Add"))
+            : FText::FromString(TEXT("Edit"));
+
+        const EVisibility DeleteVisibility = bAddMode
+            ? EVisibility::Collapsed
+            : EVisibility::Visible;
 
         ChildSlot
         [
@@ -387,46 +401,52 @@ public:
                         })
                     .OnMouseButtonDoubleClick_Lambda([this](TSharedPtr<FString> Item)
                     {
-                        // Double-click = Edit
+                        // Double-click = primary confirm action (Edit or Add)
                         if (Item.IsValid())
                         {
                             ChosenMod = *Item;
-                            Action    = EModPickerAction::Edit;
+                            Action    = bAddMode ? EModPickerAction::Add
+                                                 : EModPickerAction::Edit;
                             CloseWindow();
                         }
                     })
                 ]
 
                 // ── Button row ───────────────────────────────────────────────
-                // Layout:  [ Delete ]   (spacer)   [ Edit ]  [ Cancel ]
+                // Edit/Delete mode:  [ Delete ]  (spacer)  [ Edit ]  [ Cancel ]
+                // Add mode:                       (spacer)  [ Add  ]  [ Cancel ]
                 + SVerticalBox::Slot()
                   .AutoHeight()
                   .Padding(FMargin(0.f, 12.f, 0.f, 0.f))
                 [
                     SNew(SHorizontalBox)
 
-                    // Delete — destructive, sits on the left
+                    // Delete — destructive, left side; hidden in Add mode
                     + SHorizontalBox::Slot()
                       .AutoWidth()
                     [
-                        SNew(SButton)
-                        .Text(FText::FromString(TEXT("Delete")))
-                        .ToolTipText(FText::FromString(
-                            TEXT("Permanently delete the selected mod folder.")))
-                        .OnClicked(this, &SModPickerDialog::OnDeleteClicked)
+                        SNew(SBox)
+                        .Visibility(DeleteVisibility)
+                        [
+                            SNew(SButton)
+                            .Text(FText::FromString(TEXT("Delete")))
+                            .ToolTipText(FText::FromString(
+                                TEXT("Permanently delete the selected mod folder.")))
+                            .OnClicked(this, &SModPickerDialog::OnDeleteClicked)
+                        ]
                     ]
 
                     // Spacer
                     + SHorizontalBox::Slot()
                       .FillWidth(1.f)
 
-                    // Edit / OK — confirm action
+                    // Add / Edit — primary confirm action
                     + SHorizontalBox::Slot()
                       .AutoWidth()
                       .Padding(FMargin(0.f, 0.f, 6.f, 0.f))
                     [
                         SNew(SButton)
-                        .Text(FText::FromString(TEXT("Edit")))
+                        .Text(OkLabel)
                         .OnClicked(this, &SModPickerDialog::OnOkClicked)
                     ]
 
@@ -442,7 +462,7 @@ public:
             ]
         ];
 
-        // Pre-select the first item so pressing Edit immediately works
+        // Pre-select the first item so pressing the primary button works immediately
         if (Items.Num() > 0)
             ListView->SetSelection(Items[0], ESelectInfo::Direct);
     }
@@ -455,6 +475,7 @@ public:
     void SetOwnerWindow(TWeakPtr<SWindow> Win) { OwnerWindow = Win; }
 
 private:
+    bool             bAddMode  = false;
     EModPickerAction Action    = EModPickerAction::Cancelled;
     FString          ChosenMod;
     TArray<TSharedPtr<FString>>               Items;
@@ -467,20 +488,20 @@ private:
             Win->RequestDestroyWindow();
     }
 
-    // ── Edit ──────────────────────────────────────────────────────────────────
+    // ── Add / Edit — primary confirm action ───────────────────────────────────
     FReply OnOkClicked()
     {
         const TArray<TSharedPtr<FString>> Selected = ListView->GetSelectedItems();
         if (Selected.Num() > 0 && Selected[0].IsValid())
         {
             ChosenMod = *Selected[0];
-            Action    = EModPickerAction::Edit;
+            Action    = bAddMode ? EModPickerAction::Add : EModPickerAction::Edit;
         }
         CloseWindow();
         return FReply::Handled();
     }
 
-    // ── Delete ────────────────────────────────────────────────────────────────
+    // ── Delete (edit/delete mode only) ────────────────────────────────────────
     FReply OnDeleteClicked()
     {
         const TArray<TSharedPtr<FString>> Selected = ListView->GetSelectedItems();
@@ -565,7 +586,8 @@ EModPickerAction UModKitDialogLibrary::ShowModPickerDialog(
 
     TSharedRef<SModPickerDialog> Content =
         SNew(SModPickerDialog)
-        .ModNames(ModNames);
+        .ModNames(ModNames)
+        .bAddMode(false);
 
     TSharedRef<SWindow> Window =
         SNew(SWindow)
@@ -587,6 +609,38 @@ EModPickerAction UModKitDialogLibrary::ShowModPickerDialog(
     return Action;
 }
 
+EModPickerAction UModKitDialogLibrary::ShowModPickerDialogAdd(
+    const TArray<FString>& ModNames,
+    FString& OutChosen)
+{
+    if (ModNames.Num() == 0)
+        return EModPickerAction::Cancelled;
+
+    TSharedRef<SModPickerDialog> Content =
+        SNew(SModPickerDialog)
+        .ModNames(ModNames)
+        .bAddMode(true);
+
+    TSharedRef<SWindow> Window =
+        SNew(SWindow)
+        .Title(FText::FromString(TEXT("Mod Manager")))
+        .ClientSize(FVector2D(340.f, 300.f))
+        .SizingRule(ESizingRule::UserSized)
+        .SupportsMinimize(false)
+        .SupportsMaximize(false);
+
+    Window->SetContent(Content);
+    Content->SetOwnerWindow(Window);
+
+    FSlateApplication::Get().AddModalWindow(Window, TSharedPtr<SWidget>());
+
+    const EModPickerAction Action = Content->GetAction();
+    if (Action == EModPickerAction::Add)
+        OutChosen = Content->GetChosen();
+
+    return Action;
+}
+
 #else // !WITH_EDITOR  ─────────────────────────────────────────────────────────
 
 FModManifestData UModKitDialogLibrary::ShowModManifestDialog(
@@ -599,6 +653,13 @@ FModManifestData UModKitDialogLibrary::ShowModManifestDialog(
 }
 
 EModPickerAction UModKitDialogLibrary::ShowModPickerDialog(
+    const TArray<FString>& /*ModNames*/,
+    FString& /*OutChosen*/)
+{
+    return EModPickerAction::Cancelled;
+}
+
+EModPickerAction UModKitDialogLibrary::ShowModPickerDialogAdd(
     const TArray<FString>& /*ModNames*/,
     FString& /*OutChosen*/)
 {

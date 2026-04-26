@@ -10,6 +10,12 @@
 #include "IContentBrowserSingleton.h"               // IContentBrowserSingleton::GetSelectedFolders()
 #include "ContentBrowserDataMenuContexts.h"         // UContentBrowserDataMenuContext_FolderMenu
 #include "ContentBrowserItem.h"                     // FContentBrowserItem::GetInternalPath()
+#include "JJKModKitSettings.h"                      // UJJKModKitSettings CDO
+#include "Misc/ConfigCacheIni.h"                    // FConfigFile — read DefaultGame.ini from disk
+#include "Misc/FileHelper.h"                        // FFileHelper::LoadFileToStringArray
+#include "Misc/Paths.h"                             // FPaths::ProjectConfigDir()
+#include "PropertyEditorModule.h"                   // FPropertyEditorModule — refresh details panels
+#include "Modules/ModuleManager.h"                  // FModuleManager
 #endif
 
 // ---------------------------------------------------------------------------
@@ -335,4 +341,135 @@ void UMontageBridgeLibrary::DumpMontageDebugInfo(UAnimMontage* Montage)
             E.GetLinkedMontage() ? *E.GetLinkedMontage()->GetName() : TEXT("null"));
     }
     UE_LOG(LogTemp, Log, TEXT("=================================================="));
+}
+
+// ---------------------------------------------------------------------------
+// RefreshModKitSettings
+// ---------------------------------------------------------------------------
+void UMontageBridgeLibrary::RefreshModKitSettings()
+{
+#if WITH_EDITOR
+    UJJKModKitSettings* Settings = GetMutableDefault<UJJKModKitSettings>();
+    if (!Settings)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[JJK Mod Kit] RefreshModKitSettings: CDO not found."));
+        return;
+    }
+
+    // ── 1. Read DefaultGame.ini from disk — bypass the GConfig in-memory cache ─
+    //
+    // WHY: Python writes CorePackagesToCook directly to Config/DefaultGame.ini on
+    // disk. GConfig is a cached merged view and may lag behind source files.
+    //
+    // IMPORTANT: Parse the file lines directly instead of relying on FConfigFile
+    // MultiFind for array entries. We specifically look for:
+    //   +CorePackagesToCook=(ModName="...",PackagePaths=(...))
+    // inside [/Script/JJKModKit.JJKModKitSettings]
+    const FString IniPath = FPaths::ProjectConfigDir() / TEXT("DefaultGame.ini");
+    TArray<FString> IniLines;
+    if (!FFileHelper::LoadFileToStringArray(IniLines, *IniPath))
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[JJK Mod Kit] RefreshModKitSettings: failed to read %s"),
+            *IniPath);
+        IniLines.Reset();
+    }
+
+    // ── 2. Parse CorePackagesToCook entries from target section ───────────────
+    TArray<FModCorePackages> NewList;
+    const FString SectionName = TEXT("/Script/JJKModKit.JJKModKitSettings");
+    const FString SectionHeader = FString::Printf(TEXT("[%s]"), *SectionName);
+    bool bInTargetSection = false;
+    UScriptStruct* StructType = FModCorePackages::StaticStruct();
+
+    for (const FString& RawLine : IniLines)
+    {
+        const FString Line = RawLine.TrimStartAndEnd();
+        if (Line.IsEmpty() || Line.StartsWith(TEXT(";")))
+        {
+            continue;
+        }
+
+        if (Line.StartsWith(TEXT("[")))
+        {
+            bInTargetSection = Line.Equals(SectionHeader, ESearchCase::CaseSensitive);
+            continue;
+        }
+
+        if (!bInTargetSection)
+        {
+            continue;
+        }
+
+        constexpr TCHAR Prefix[] = TEXT("+CorePackagesToCook=");
+        if (!Line.StartsWith(Prefix))
+        {
+            continue;
+        }
+
+        const FString Value = Line.RightChop(UE_ARRAY_COUNT(Prefix) - 1);
+        FModCorePackages Entry;
+        StructType->ImportText(*Value, &Entry, nullptr, PPF_None, nullptr, StructType->GetName());
+        if (!Entry.ModName.IsEmpty())
+        {
+            NewList.Add(Entry);
+        }
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[JJK Mod Kit] RefreshModKitSettings: parsed %d entries from %s"),
+        NewList.Num(), *IniPath);
+
+    // ── 3. Set on CDO directly ────────────────────────────────────────────────
+    Settings->Modify();
+    Settings->CorePackagesToCook = NewList;
+
+    // ── 4. Notify open Details panels — bypass SaveConfig ────────────────────
+    //
+    // We broadcast OnObjectPropertyChanged DIRECTLY instead of going through
+    // UDeveloperSettings::PostEditChangeProperty.
+    //
+    // WHY NOT PostEditChangeProperty:
+    //   UDeveloperSettings::PostEditChangeProperty calls SaveConfig() which:
+    //   (a) writes the CDO to DefaultGame.ini (harmless), AND
+    //   (b) reloads GConfig from GGameIni — the stale in-memory merged ini
+    //       that does NOT include our new DefaultGame.ini entries.
+    //   That reload writes empty data back to the CDO, undoing step 3.
+    //
+    // WHY THIS WORKS:
+    //   IDetailsView connects to FCoreUObjectDelegates::OnObjectPropertyChanged.
+    //   UObject::PostEditChangeProperty's ONLY job is to broadcast that delegate
+    //   (plus call Super which is UObject, a no-op for delegates).
+    //   Broadcasting the delegate directly gives the panel the refresh signal
+    //   while keeping the CDO intact.
+    // Prefer broadcasting a *property-specific* change for the array; some
+    // details panels won't repaint array widgets reliably if Property == nullptr.
+    FProperty* CorePackagesProp =
+        FindFProperty<FProperty>(UJJKModKitSettings::StaticClass(),
+                                 GET_MEMBER_NAME_CHECKED(UJJKModKitSettings, CorePackagesToCook));
+    // Broadcast a couple of change types; some array widgets only rebuild on
+    // explicit array change notifications.
+    FPropertyChangedEvent ChangedArray(CorePackagesProp, EPropertyChangeType::ArrayClear);
+    FCoreUObjectDelegates::OnObjectPropertyChanged.Broadcast(Settings, ChangedArray);
+    FPropertyChangedEvent ChangedValue(CorePackagesProp, EPropertyChangeType::ValueSet);
+    FCoreUObjectDelegates::OnObjectPropertyChanged.Broadcast(Settings, ChangedValue);
+
+    // Also emit an object modified signal; some details hosts listen to this.
+    FCoreUObjectDelegates::OnObjectModified.Broadcast(Settings);
+
+    // Some open details panels (notably Project Settings) can still keep stale
+    // array widget state. Ask the PropertyEditor module to refresh its views
+    // without opening/focusing the Settings UI.
+    if (FModuleManager::Get().IsModuleLoaded(TEXT("PropertyEditor")))
+    {
+        FPropertyEditorModule& PropertyModule =
+            FModuleManager::LoadModuleChecked<FPropertyEditorModule>(TEXT("PropertyEditor"));
+        PropertyModule.NotifyCustomizationModuleChanged();
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[JJK Mod Kit] RefreshModKitSettings: %d entries set on CDO, "
+             "Details panel notified."),
+        NewList.Num());
+#endif
 }
