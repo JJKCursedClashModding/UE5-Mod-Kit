@@ -8,7 +8,7 @@
 
 ## Getting Started
 
-1. Run the build.ps1 script to compile the project (can't be open in editor)
+1. 
 2. Open the JJK Mod Kit menu and click 'Import Game Assets'
 3. 
 
