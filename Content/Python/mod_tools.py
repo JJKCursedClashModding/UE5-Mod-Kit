@@ -212,6 +212,222 @@ def _log_error(msg: str) -> None:
     print(f"ERROR: {msg}", file=sys.stderr)
 
 
+def _mklink_junction(link_path: Path, target_path: Path) -> bool:
+    try:
+        cmd = f'mklink /J "{link_path}" "{target_path}"'
+        proc = subprocess.run(["cmd", "/c", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _safe_copytree(src: Path, dst: Path) -> None:
+    """
+    Copy a tree while skipping volatile/generated directories that frequently
+    change during editor/runtime operation and can cause copy races.
+    """
+    ignore = shutil.ignore_patterns(
+        "Intermediate",
+        "Saved",
+        "DerivedDataCache",
+        ".vs",
+    )
+    shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
+
+
+def _prepare_temp_mods_cook_workspace(folder: str) -> tuple[Path, Path] | None:
+    """
+    Create a temporary project workspace for /Game/Mods cooks.
+    Uses the same temp-project approach as core-cook, while copying the
+    project's DefaultGame.ini verbatim to keep configuration parity.
+
+    Dependency seed source:
+      - Collect package seeds from files under Content/Mods (or only the selected
+        /Game/Mods/<ModName> subtree for single-mod cooks).
+      - Expand hard dependencies via AssetRegistry (when running inside editor).
+      - Copy dependency sidecar files into temp Content for any /Game package
+        outside /Game/Mods.
+    """
+    src_root = _get_project_root()
+    src_project = _get_project_file()
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    temp_root = src_root / "Saved" / "CoreCookTemp" / f"Cook_Mods_{stamp}"
+    temp_project = temp_root / src_project.name
+
+    temp_content = temp_root / "Content"
+    temp_content.mkdir(parents=True, exist_ok=True)
+
+    shutil.copy2(src_project, temp_project)
+    src_config = src_root / "Config"
+    if src_config.exists():
+        shutil.copytree(src_config, temp_root / "Config", dirs_exist_ok=True)
+    else:
+        (temp_root / "Config").mkdir(parents=True, exist_ok=True)
+        (temp_root / "Config" / "DefaultGame.ini").write_text("", encoding="utf-8")
+
+    for name in ("Plugins", "Source", "Binaries"):
+        src_dir = src_root / name
+        if not src_dir.exists():
+            continue
+        dst_dir = temp_root / name
+        if not _mklink_junction(dst_dir, src_dir):
+            _log(f"[JJK Cook] Junction for {name} failed; using filtered copy.")
+            _safe_copytree(src_dir, dst_dir)
+
+    src_mods = src_root / "Content" / "Mods"
+    dst_mods = temp_content / "Mods"
+    if not src_mods.exists():
+        _log_error("[JJK Cook] Temp workspace: Content/Mods not found.")
+        return None
+    _safe_copytree(src_mods, dst_mods)
+
+    # Mirror all /Game/Editor support assets into temp. Some project/plugin
+    # defaults (ACL and others) are loaded early during cook.
+    editor_src = src_root / "Content" / "Editor"
+    if editor_src.exists():
+        _safe_copytree(editor_src, temp_content / "Editor")
+
+    def _seed_mod_packages() -> list[str]:
+        base = src_mods
+        if folder.startswith("/Game/Mods/"):
+            mod_rel = folder[len("/Game/Mods/"):].strip("/")
+            if mod_rel:
+                base = src_mods / mod_rel
+        if not base.exists():
+            return []
+        seeds: set[str] = set()
+        for path in base.rglob("*"):
+            if not path.is_file():
+                continue
+            ext = path.suffix.lower()
+            if ext not in (".uasset", ".umap"):
+                continue
+            rel = path.relative_to(src_root / "Content").with_suffix("")
+            seeds.add("/Game/" + rel.as_posix())
+        return sorted(seeds)
+
+    def _collect_asset_manager_base_classes_from_config() -> list[str]:
+        """
+        Collect /Game package paths from AssetBaseClass entries in Config/DefaultGame.ini.
+        Example:
+          AssetBaseClass="/Game/Traps/GameTrap_BP.GameTrap_BP_C"
+          -> /Game/Traps/GameTrap_BP
+        """
+        import re
+
+        cfg = src_root / "Config" / "DefaultGame.ini"
+        if not cfg.exists():
+            return []
+        try:
+            text = cfg.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return []
+
+        out: set[str] = set()
+        for m in re.finditer(r'AssetBaseClass="?(/Game/[^",\)\s]+)"?', text):
+            value = m.group(1).strip()
+            pkg = value.split(".", 1)[0]
+            if pkg.startswith("/Game/"):
+                out.add(pkg)
+        return sorted(out)
+
+    def _expand_with_dependencies(seed_paths: list[str]) -> list[str]:
+        try:
+            import unreal
+            ar = unreal.AssetRegistryHelpers.get_asset_registry()
+            dep_opts = unreal.AssetRegistryDependencyOptions(
+                include_hard_package_references=True,
+                include_soft_package_references=True,
+                include_hard_management_references=False,
+                include_soft_management_references=False,
+                include_searchable_names=False,
+            )
+        except Exception:
+            return list(seed_paths)
+
+        seen: set[str] = set(p for p in seed_paths if p.startswith("/Game/"))
+        queue: list[str] = list(seen)
+        max_packages = 10000
+
+        while queue and len(seen) < max_packages:
+            curr = queue.pop(0)
+            try:
+                deps = ar.get_dependencies(curr, dep_opts) or []
+            except Exception:
+                deps = []
+            for dep in deps:
+                dep_s = str(dep)
+                if not dep_s.startswith("/Game/"):
+                    continue
+                if dep_s in seen:
+                    continue
+                seen.add(dep_s)
+                queue.append(dep_s)
+        return sorted(seen)
+
+    def _copy_package_sidecars(pkg_path: str, *, force_copy: bool = False) -> bool:
+        # Some extracted base-game assets are cooked/unversioned and cannot be
+        # safely loaded by the editor process. Skip copying those into temp.
+        if not force_copy:
+            try:
+                import unreal
+                loaded = unreal.EditorAssetLibrary.load_asset(pkg_path)
+                if loaded is None:
+                    return False
+            except Exception:
+                # Outside editor or load probe unavailable: fall back to file copy.
+                pass
+
+        rel = pkg_path[len("/Game/"):]
+        rel_path = Path(rel)
+        src_dir = src_root / "Content" / rel_path.parent
+        dst_dir = temp_content / rel_path.parent
+        base_name = rel_path.name
+        sidecars = sorted(src_dir.glob(f"{base_name}.*")) if src_dir.exists() else []
+        if not sidecars:
+            return False
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for src in sidecars:
+            shutil.copy2(src, dst_dir / src.name)
+        return True
+
+    seed_paths = _seed_mod_packages()
+    base_class_paths = _collect_asset_manager_base_classes_from_config()
+    all_seed_paths = sorted(set(seed_paths + base_class_paths))
+    expanded_paths = _expand_with_dependencies(all_seed_paths)
+    copied_deps = 0
+    forced_deps = 0
+    for pkg_path in expanded_paths:
+        # Full Mods folder is copied wholesale above; only backfill dependencies
+        # from outside /Game/Mods.
+        if pkg_path.startswith("/Game/Mods/") or pkg_path == "/Game/Mods":
+            continue
+        # Recursively copy full dependency graph for mod assets so deep parent
+        # chains (parent-of-parent, etc.) are always present in temp.
+        force_copy = True
+        if _copy_package_sidecars(pkg_path, force_copy=force_copy):
+            copied_deps += 1
+            if force_copy:
+                forced_deps += 1
+
+    if expanded_paths and len(expanded_paths) > len(all_seed_paths):
+        _log(
+            f"[JJK Cook] Temp workspace: expanded {len(all_seed_paths)} seed package(s) "
+            f"to {len(expanded_paths)} including dependencies."
+        )
+    if base_class_paths:
+        _log(
+            f"[JJK Cook] Temp workspace: included {len(base_class_paths)} "
+            "AssetManager base-class package(s) from config."
+        )
+    if copied_deps:
+        _log(f"[JJK Cook] Temp workspace: copied dependency files for {copied_deps} package(s).")
+    if forced_deps:
+        _log(f"[JJK Cook] Temp workspace: force-copied {forced_deps} recursive dependency package(s).")
+
+    return temp_root, temp_project
+
+
 # ─── Public API ──────────────────────────────────────────────────────────────
 
 def open_settings_dialog() -> None:
@@ -515,6 +731,9 @@ def cook(folder: str = "/Game/Mods") -> int:
 
     Returns 0 on success, non-zero on failure.
     """
+    global _mods_cook_output_content_root
+    _mods_cook_output_content_root = None
+
     try:
         ue_cmd       = _get_ue_editor_cmd()
         project_file = _get_project_file()
@@ -525,9 +744,22 @@ def cook(folder: str = "/Game/Mods") -> int:
 
     log_file = project_root / "log.txt"
 
+    run_cwd = project_root
+    run_project_file = project_file
+    if folder.startswith("/Game/Mods"):
+        prepared = _prepare_temp_mods_cook_workspace(folder)
+        if prepared is None:
+            return 1
+        temp_root, temp_project_file = prepared
+        run_cwd = temp_root
+        run_project_file = temp_project_file
+        _mods_cook_output_content_root = (
+            temp_root / "Saved" / "Cooked" / "Windows" / temp_project_file.stem / "Content"
+        )
+
     cmd = [
         str(ue_cmd),
-        str(project_file),
+        str(run_project_file),
         "-run=Cook",
         "-TargetPlatform=Windows",
         f"-CookDir={folder}",
@@ -550,7 +782,7 @@ def cook(folder: str = "/Game/Mods") -> int:
     with open(log_file, "w", encoding="utf-8") as log_f:
         proc = subprocess.Popen(
             cmd,
-            cwd=str(project_root),
+            cwd=str(run_cwd),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -633,7 +865,8 @@ def stage_mod(mod_name: str) -> int:
         return 1
 
     mod_name       = mod_name.strip()
-    cooked_mod_dir = _get_cooked_dir() / "Content" / "Mods" / mod_name
+    cooked_content = _mods_cook_output_content_root or (_get_cooked_dir() / "Content")
+    cooked_mod_dir = cooked_content / "Mods" / mod_name
     dest           = _get_mod_assets_content_dest(_get_game_mods_path(), mod_name)
 
     _log(f"=== Staging mod: {mod_name} ===")
@@ -732,6 +965,8 @@ _async_core_cook_state: dict = {
 
 # Per-mod cooked Content roots for the most recent core-package cook.
 _core_cook_output_content_by_mod: dict[str, Path] = {}
+# Cooked Content root for the most recent "Cook & Export Mods" run.
+_mods_cook_output_content_root: Path | None = None
 
 
 # ─── Asset Registry generation ───────────────────────────────────────────────
@@ -753,7 +988,10 @@ def _generate_mod_asset_registries(mods: list[str], game_mods_path: Path) -> Non
 
     project_root       = _get_project_root()
     jjkue_exe          = project_root / "Tools" / "jjkue.exe"
-    asset_registry_bin = _get_cooked_dir() / "AssetRegistry.bin"
+    if _mods_cook_output_content_root is not None:
+        asset_registry_bin = _mods_cook_output_content_root.parent / "AssetRegistry.bin"
+    else:
+        asset_registry_bin = _get_cooked_dir() / "AssetRegistry.bin"
 
     if not jjkue_exe.exists():
         _log_error(
@@ -905,7 +1143,8 @@ def cook_and_stage_all_mods() -> None:
         return
 
     game_mods_path = _get_game_mods_path()
-    cooked_base    = _get_cooked_dir() / "Content" / "Mods"
+    cooked_content = _mods_cook_output_content_root or (_get_cooked_dir() / "Content")
+    cooked_base    = cooked_content / "Mods"
     results: dict[str, str] = {}
     for mod_name in mods:
         cooked_mod_dir = cooked_base / mod_name
@@ -989,7 +1228,8 @@ def cook_and_stage_all_mods_async() -> None:
                 return
 
             game_mods_path = _get_game_mods_path()
-            cooked_base    = _get_cooked_dir() / "Content" / "Mods"
+            cooked_content = _mods_cook_output_content_root or (_get_cooked_dir() / "Content")
+            cooked_base    = cooked_content / "Mods"
             failed: list[str] = []
             for mod_name in mods:
                 cooked_mod_dir = cooked_base / mod_name
@@ -1263,27 +1503,6 @@ def _cook_core_packages_for_mod(mod_name: str, package_paths: list) -> int:
             )
         valid_paths.append(pkg_path)
 
-    def _mklink_junction(link_path: Path, target_path: Path) -> bool:
-        try:
-            cmd = f'mklink /J "{link_path}" "{target_path}"'
-            proc = subprocess.run(["cmd", "/c", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            return proc.returncode == 0
-        except Exception:
-            return False
-
-    def _safe_copytree(src: Path, dst: Path) -> None:
-        """
-        Copy a tree while skipping volatile/generated directories that frequently
-        change during editor/runtime operation and can cause copy races.
-        """
-        ignore = shutil.ignore_patterns(
-            "Intermediate",
-            "Saved",
-            "DerivedDataCache",
-            ".vs",
-        )
-        shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
-
     def _prepare_temp_core_cook_workspace(mod_name_local: str, package_paths_local: list[str]) -> tuple[Path, Path, list[str]] | None:
         """
         Create a clean temporary project workspace and copy only selected package files.
@@ -1302,19 +1521,11 @@ def _cook_core_packages_for_mod(mod_name: str, package_paths: list) -> int:
         temp_config.mkdir(parents=True, exist_ok=True)
 
         shutil.copy2(src_project, temp_project)
-        # Clean-project approach: do not inherit full project Config, because it
-        # drags packaging and asset-manager policies that have repeatedly caused
-        # unrelated cooks and target package drops in this workflow.
-        minimal_default_game = (
-            "[/Script/UnrealEd.ProjectPackagingSettings]\n"
-            "bCookAll=False\n"
-            "bCookMapsOnly=False\n"
-            "\n"
-            "[/Script/Engine.AssetManagerSettings]\n"
-            "!PrimaryAssetTypesToScan=ClearArray\n"
-            "!PrimaryAssetRules=ClearArray\n"
-        )
-        (temp_config / "DefaultGame.ini").write_text(minimal_default_game, encoding="utf-8")
+        src_default_game = src_root / "Config" / "DefaultGame.ini"
+        if src_default_game.exists():
+            shutil.copy2(src_default_game, temp_config / "DefaultGame.ini")
+        else:
+            (temp_config / "DefaultGame.ini").write_text("", encoding="utf-8")
 
         # Disable problematic runtime plugin(s) in temp workspace only.
         try:
@@ -1331,30 +1542,6 @@ def _cook_core_packages_for_mod(mod_name: str, package_paths: list) -> int:
                 _log("[JJK Core Cook] Temp workspace: disabled CriWare plugin.")
         except Exception as exc:
             _log(f"[JJK Core Cook] Temp workspace: could not patch .uproject plugins ({exc}).")
-
-        # Scrub AssetManager entries in temp config.
-        # In this project, primary asset scans can include game classes from
-        # folders that are intentionally absent in this isolated workspace,
-        # which triggers handled ensures and derails target-package cooks.
-        temp_default_game = temp_config / "DefaultGame.ini"
-        if temp_default_game.exists():
-            try:
-                lines = temp_default_game.read_text(encoding="utf-8").splitlines(keepends=True)
-                filtered: list[str] = []
-                removed = 0
-                for line in lines:
-                    s = line.strip()
-                    # Remove all project-configured primary asset scans/rules for
-                    # this temporary cook process.
-                    if "PrimaryAssetTypesToScan" in s or "PrimaryAssetRules" in s:
-                        removed += 1
-                        continue
-                    filtered.append(line)
-                if removed:
-                    temp_default_game.write_text("".join(filtered), encoding="utf-8")
-                    _log(f"[JJK Core Cook] Temp workspace: removed {removed} AssetManager scan/rule line(s).")
-            except Exception as exc:
-                _log(f"[JJK Core Cook] Temp workspace: could not scrub DefaultGame.ini ({exc}).")
 
         # Preserve plugin/module discovery by mirroring project-relative roots.
         src_plugins = src_root / "Plugins"
@@ -1426,10 +1613,7 @@ def _cook_core_packages_for_mod(mod_name: str, package_paths: list) -> int:
                 shutil.copy2(src, dst_dir / src.name)
             return True
 
-        # Keep this path deterministic: copy/cook only explicitly requested
-        # targets. Dependency/bootstrap expansion caused broad unrelated cooks
-        # and obscured whether the requested package was actually processed.
-        expanded_paths = list(package_paths_local)
+        expanded_paths = _expand_with_dependencies(package_paths_local)
         copied_paths: list[str] = []
         missing_paths: list[str] = []
         for pkg_path in expanded_paths:
