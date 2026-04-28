@@ -600,12 +600,28 @@ def _stage(cooked_mod_dir: Path, dest: Path, mod_name: str) -> int:
     return count
 
 
+def _get_mod_assets_content_dest(game_mods_path: Path, mod_name: str) -> Path:
+    """
+    Canonical staged content root for a mod:
+      <game_mods_path>/<mod_name>/assets/Jujutsu Kaisen CC/Content/Mods/<mod_name>
+    """
+    return (
+        game_mods_path
+        / mod_name
+        / "assets"
+        / "Jujutsu Kaisen CC"
+        / "Content"
+        / "Mods"
+        / mod_name
+    )
+
+
 def stage_mod(mod_name: str) -> int:
     """
     Copy cooked assets for *mod_name* to the game's mods folder.
 
     Destination:
-        <game_mods_path>/<mod_name>/assets/Jujutsu Kaisen CC/<cooked files>
+        <game_mods_path>/<mod_name>/assets/Jujutsu Kaisen CC/Content/Mods/<mod_name>/<cooked files>
 
     The game_mods_path is derived from GameExePath:
         <exe folder>/../../Content/Mods
@@ -618,7 +634,7 @@ def stage_mod(mod_name: str) -> int:
 
     mod_name       = mod_name.strip()
     cooked_mod_dir = _get_cooked_dir() / "Content" / "Mods" / mod_name
-    dest           = _get_game_mods_path() / mod_name / "assets" / "Jujutsu Kaisen CC"
+    dest           = _get_mod_assets_content_dest(_get_game_mods_path(), mod_name)
 
     _log(f"=== Staging mod: {mod_name} ===")
     _log(f"  Source : {cooked_mod_dir}")
@@ -835,7 +851,8 @@ def _copy_manifest(mod_name: str, game_mods_path: Path) -> None:
 
 def cook_and_stage_mod(mod_name: str) -> None:
     """
-    Cook a single mod and stage it to <game_mods_path>/<mod_name>/assets/<path>.
+    Cook a single mod and stage it to:
+      <game_mods_path>/<mod_name>/assets/Jujutsu Kaisen CC/Content/Mods/<mod_name>/<path>.
 
     game_mods_path is derived from GameExePath:
         <exe folder>/../../Content/Mods
@@ -858,7 +875,7 @@ def cook_and_stage_mod(mod_name: str) -> None:
 
     game_mods_path = _get_game_mods_path()
     cooked_mod_dir = _get_cooked_dir() / "Content" / "Mods" / mod_name
-    dest           = game_mods_path / mod_name / "assets"
+    dest           = _get_mod_assets_content_dest(game_mods_path, mod_name)
     count          = _stage(cooked_mod_dir, dest, mod_name)
     if count >= 0:
         _log(f"✓ {mod_name}: staged {count} file(s) → {dest}")
@@ -870,7 +887,8 @@ def cook_and_stage_all_mods() -> None:
     Cook ALL mods under Content/Mods/ then stage each one.
 
     Calls cook("/Game/Mods") for a single combined cook pass, then copies
-    each mod's cooked output to <game_mods_path>/<mod_name>/assets/<path>.
+    each mod's cooked output to:
+      <game_mods_path>/<mod_name>/assets/Jujutsu Kaisen CC/Content/Mods/<mod_name>/<path>.
 
     game_mods_path is derived from the GameExePath setting:
         <exe folder>/../../Content/Mods
@@ -891,7 +909,7 @@ def cook_and_stage_all_mods() -> None:
     results: dict[str, str] = {}
     for mod_name in mods:
         cooked_mod_dir = cooked_base / mod_name
-        dest           = game_mods_path / mod_name / "assets"
+        dest           = _get_mod_assets_content_dest(game_mods_path, mod_name)
         count          = _stage(cooked_mod_dir, dest, mod_name)
         if count < 0:
             results[mod_name] = "SKIPPED (no cooked output)"
@@ -975,7 +993,7 @@ def cook_and_stage_all_mods_async() -> None:
             failed: list[str] = []
             for mod_name in mods:
                 cooked_mod_dir = cooked_base / mod_name
-                dest           = game_mods_path / mod_name / "assets"
+                dest           = _get_mod_assets_content_dest(game_mods_path, mod_name)
                 count          = _stage(cooked_mod_dir, dest, mod_name)
                 if count < 0:
                     failed.append(mod_name)
@@ -1605,18 +1623,18 @@ def _cook_core_packages_for_mod(mod_name: str, package_paths: list) -> int:
 def _stage_core_packages(mod_name: str, package_paths: list) -> int:
     """
     Copy cooked output for *package_paths* to:
-        <game_mods_path>/<mod_name>/assets/<path relative to /Game>
+        <game_mods_path>/<mod_name>/assets/Jujutsu Kaisen CC/Content/<path relative to /Game>
 
     For /Game/Characters/CP_010/AM_Foo the cooked file is at:
         Saved/Cooked/Windows/.../Content/Characters/CP_010/AM_Foo.uasset
     and is staged to:
-        <game_mods_path>/<mod_name>/assets/Characters/CP_010/AM_Foo.uasset
+        <game_mods_path>/<mod_name>/assets/Jujutsu Kaisen CC/Content/Characters/CP_010/AM_Foo.uasset
 
     Returns the number of files copied, or -1 on unrecoverable error.
     """
     cooked_content = _core_cook_output_content_by_mod.get(mod_name, _get_cooked_dir() / "Content")
     game_mods_path = _get_game_mods_path()
-    dest_assets    = game_mods_path / mod_name / "assets"
+    dest_assets    = game_mods_path / mod_name / "assets" / "Jujutsu Kaisen CC" / "Content"
 
     copied = 0
     had_missing = False
@@ -1662,7 +1680,7 @@ def cook_modded_game_assets() -> None:
     For each mod entry in CorePackagesToCook:
       1. Cooks the listed packages in isolation, bypassing DirectoriesToNeverCook.
       2. Copies cooked files to:
-             <game_mods_path>/<mod_name>/assets/<relative path under /Game>
+             <game_mods_path>/<mod_name>/assets/Jujutsu Kaisen CC/Content/<relative path under /Game>
 
     Configure the list via:
         Edit → Project Settings → Plugins → JJK Mod Kit → Core Packages to Cook
