@@ -321,6 +321,8 @@ def _register_jjkcc_menu():
         "Add assets to the list by right-clicking them in the\n"
         "Content Browser → JJK Mod Kit → Add to Core Packages to Cook…\n\n"
         "Each package is cooked in isolation (bypassing NeverCook) then\n"
+        "processed asynchronously so the editor stays responsive.\n\n"
+        "Cooked files are\n"
         "copied to:\n"
         "  <game mods path>/<mod folder>/assets/<relative path under /Game>"
     )
@@ -330,7 +332,7 @@ def _register_jjkcc_menu():
         string      = (
             "import importlib, mod_tools; "
             "importlib.reload(mod_tools); "
-            "mod_tools.cook_modded_game_assets()"
+            "mod_tools.cook_modded_game_assets_async()"
         ),
     )
     jjk_menu.add_menu_entry("ModCooking", entry_cook_modded)

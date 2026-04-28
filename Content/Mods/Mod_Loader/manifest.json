@@ -1,0 +1,6 @@
+{
+	"title": "Mod Loader",
+	"description": "Loads all actors that inherit from ModActor",
+	"version": "v1",
+	"priority": 0
+}

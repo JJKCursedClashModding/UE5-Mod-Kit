@@ -16,7 +16,9 @@ from __future__ import annotations   # allows X | Y union hints on Python 3.9 (U
 import sys
 import shutil
 import subprocess
+import json
 from pathlib import Path
+from datetime import datetime
 
 # ─── Extra cook flags (appended to every cook command) ───────────────────────
 #
@@ -24,6 +26,10 @@ from pathlib import Path
 # -NoLogTimes, -NoSplash, -Unattended, -NullRHI, -stdout) are fixed inside
 # cook().  Add *optional* overrides here when needed.
 _MOD_COOK_FLAGS: list[str] = []
+
+# Bump this whenever core-cook command behavior changes, so Output Log clearly
+# shows which on-disk script version the running editor session is using.
+_CORE_COOK_SCRIPT_VERSION = "core-cook-v7"
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
 
@@ -526,6 +532,10 @@ def cook(folder: str = "/Game/Mods") -> int:
         "-TargetPlatform=Windows",
         f"-CookDir={folder}",
         "-Unversioned",
+        # Force loose cooked package output in temp-core-cook flow.
+        "-NoZenStore",
+        "-SkipPackageStore",
+        "-NoIoStore",
         "-NoLogTimes",
         "-NoSplash",
         "-Unattended",
@@ -696,6 +706,16 @@ _async_cook_state: dict = {
     "message":     "",      # Human-readable outcome description
     "tick_handle": None,    # Handle returned by register_slate_post_tick_callback
 }
+
+_async_core_cook_state: dict = {
+    "running":     False,   # True while the worker thread is alive
+    "result":      None,    # True=success, False=failure, None=not yet done
+    "message":     "",      # Human-readable outcome description
+    "tick_handle": None,    # Handle returned by register_slate_post_tick_callback
+}
+
+# Per-mod cooked Content roots for the most recent core-package cook.
+_core_cook_output_content_by_mod: dict[str, Path] = {}
 
 
 # ─── Asset Registry generation ───────────────────────────────────────────────
@@ -869,7 +889,6 @@ def cook_and_stage_all_mods() -> None:
     game_mods_path = _get_game_mods_path()
     cooked_base    = _get_cooked_dir() / "Content" / "Mods"
     results: dict[str, str] = {}
-
     for mod_name in mods:
         cooked_mod_dir = cooked_base / mod_name
         dest           = game_mods_path / mod_name / "assets"
@@ -954,7 +973,6 @@ def cook_and_stage_all_mods_async() -> None:
             game_mods_path = _get_game_mods_path()
             cooked_base    = _get_cooked_dir() / "Content" / "Mods"
             failed: list[str] = []
-
             for mod_name in mods:
                 cooked_mod_dir = cooked_base / mod_name
                 dest           = game_mods_path / mod_name / "assets"
@@ -1183,10 +1201,27 @@ def get_core_packages_to_cook() -> list:
 
 
 def _cook_core_packages_for_mod(mod_name: str, package_paths: list) -> int:
+    # Project bootstrap blueprint packages that are loaded during startup in
+    # this game and can prevent target package save if absent in temp workspace.
+    _BOOTSTRAP_GAME_PACKAGES = [
+        "/Game/Characters/GameCharacter_BP",
+        "/Game/Characters/GameNPC_BP",
+        "/Game/Characters/GameShikigami_BP",
+        "/Game/Traps/GameTrap_BP",
+        "/Game/Effects/GameEffect_BP",
+        "/Game/Weapons/GameWeapon_BP",
+        "/Game/Decals/GameDecalActor_BP",
+    ]
+
     """
-    Cook *package_paths* using the per-asset NeverCook-bypass technique:
-      -cooksinglepackagenorefs
-      -ini: to clear DirectoriesToNeverCook and disable bCookAll
+    Cook *package_paths* by cooking only their parent directories, while
+    bypassing NeverCook and bCookAll via per-process ini overrides.
+
+    Notes:
+      - Use -CookDir with -cooksinglepackage and the companion single-package
+        flags exposed by UCookCommandlet/UCookOnTheFlyServer.
+      - This avoids broad "always cook" sweeps and keeps the run focused.
+      - Staging still filters to exact package base names from package_paths.
 
     Returns 0 on success, 1 on non-fatal warnings, >1 on hard failure.
     """
@@ -1194,45 +1229,346 @@ def _cook_core_packages_for_mod(mod_name: str, package_paths: list) -> int:
         _log(f"[JJK Core Cook] {mod_name}: no packages to cook — skipping.")
         return 0
 
+    # Best-effort preflight check only. Some valid editor-visible assets may be
+    # mounted/redirected and not map 1:1 to Content/*.uasset on disk.
+    valid_paths: list[str] = []
+    for pkg_path in package_paths:
+        if not pkg_path.startswith("/Game/"):
+            _log_error(f"[JJK Core Cook] Invalid package path (must start with /Game/): {pkg_path}")
+            continue
+        rel = pkg_path[len("/Game/"):] + ".uasset"
+        src = _get_project_root() / "Content" / rel
+        if not src.exists():
+            _log(
+                f"[JJK Core Cook] Warning: package not found at expected disk path: "
+                f"{pkg_path} ({src}) — will still attempt cook."
+            )
+        valid_paths.append(pkg_path)
+
+    def _mklink_junction(link_path: Path, target_path: Path) -> bool:
+        try:
+            cmd = f'mklink /J "{link_path}" "{target_path}"'
+            proc = subprocess.run(["cmd", "/c", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            return proc.returncode == 0
+        except Exception:
+            return False
+
+    def _safe_copytree(src: Path, dst: Path) -> None:
+        """
+        Copy a tree while skipping volatile/generated directories that frequently
+        change during editor/runtime operation and can cause copy races.
+        """
+        ignore = shutil.ignore_patterns(
+            "Intermediate",
+            "Saved",
+            "DerivedDataCache",
+            ".vs",
+        )
+        shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
+
+    def _prepare_temp_core_cook_workspace(mod_name_local: str, package_paths_local: list[str]) -> tuple[Path, Path, list[str]] | None:
+        """
+        Create a clean temporary project workspace and copy only selected package files.
+        Returns: (temp_root, temp_project_file, filtered_package_paths)
+        """
+        src_root = _get_project_root()
+        src_project = _get_project_file()
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        safe_mod = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in mod_name_local) or "CoreCook"
+        temp_root = src_root / "Saved" / "CoreCookTemp" / f"{safe_mod}_{stamp}"
+        temp_content = temp_root / "Content"
+        temp_config = temp_root / "Config"
+        temp_project = temp_root / src_project.name
+
+        temp_content.mkdir(parents=True, exist_ok=True)
+        temp_config.mkdir(parents=True, exist_ok=True)
+
+        shutil.copy2(src_project, temp_project)
+        # Clean-project approach: do not inherit full project Config, because it
+        # drags packaging and asset-manager policies that have repeatedly caused
+        # unrelated cooks and target package drops in this workflow.
+        minimal_default_game = (
+            "[/Script/UnrealEd.ProjectPackagingSettings]\n"
+            "bCookAll=False\n"
+            "bCookMapsOnly=False\n"
+            "\n"
+            "[/Script/Engine.AssetManagerSettings]\n"
+            "!PrimaryAssetTypesToScan=ClearArray\n"
+            "!PrimaryAssetRules=ClearArray\n"
+        )
+        (temp_config / "DefaultGame.ini").write_text(minimal_default_game, encoding="utf-8")
+
+        # Disable problematic runtime plugin(s) in temp workspace only.
+        try:
+            data = json.loads(temp_project.read_text(encoding="utf-8"))
+            plugins = data.get("Plugins", [])
+            changed = False
+            for plugin in plugins:
+                if str(plugin.get("Name", "")).lower() == "criware":
+                    if plugin.get("Enabled", True):
+                        plugin["Enabled"] = False
+                        changed = True
+            if changed:
+                temp_project.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                _log("[JJK Core Cook] Temp workspace: disabled CriWare plugin.")
+        except Exception as exc:
+            _log(f"[JJK Core Cook] Temp workspace: could not patch .uproject plugins ({exc}).")
+
+        # Scrub AssetManager entries in temp config.
+        # In this project, primary asset scans can include game classes from
+        # folders that are intentionally absent in this isolated workspace,
+        # which triggers handled ensures and derails target-package cooks.
+        temp_default_game = temp_config / "DefaultGame.ini"
+        if temp_default_game.exists():
+            try:
+                lines = temp_default_game.read_text(encoding="utf-8").splitlines(keepends=True)
+                filtered: list[str] = []
+                removed = 0
+                for line in lines:
+                    s = line.strip()
+                    # Remove all project-configured primary asset scans/rules for
+                    # this temporary cook process.
+                    if "PrimaryAssetTypesToScan" in s or "PrimaryAssetRules" in s:
+                        removed += 1
+                        continue
+                    filtered.append(line)
+                if removed:
+                    temp_default_game.write_text("".join(filtered), encoding="utf-8")
+                    _log(f"[JJK Core Cook] Temp workspace: removed {removed} AssetManager scan/rule line(s).")
+            except Exception as exc:
+                _log(f"[JJK Core Cook] Temp workspace: could not scrub DefaultGame.ini ({exc}).")
+
+        # Preserve plugin/module discovery by mirroring project-relative roots.
+        src_plugins = src_root / "Plugins"
+        if src_plugins.exists():
+            if not _mklink_junction(temp_root / "Plugins", src_plugins):
+                _log("[JJK Core Cook] Junction for Plugins failed; using filtered copy.")
+                _safe_copytree(src_plugins, temp_root / "Plugins")
+        src_source = src_root / "Source"
+        if src_source.exists():
+            if not _mklink_junction(temp_root / "Source", src_source):
+                _log("[JJK Core Cook] Junction for Source failed; using filtered copy.")
+                _safe_copytree(src_source, temp_root / "Source")
+        src_binaries = src_root / "Binaries"
+        if src_binaries.exists():
+            if not _mklink_junction(temp_root / "Binaries", src_binaries):
+                _log("[JJK Core Cook] Junction for Binaries failed; using filtered copy.")
+                _safe_copytree(src_binaries, temp_root / "Binaries")
+
+        def _expand_with_dependencies(seed_paths: list[str]) -> list[str]:
+            """
+            Expand /Game package paths with hard package dependencies from
+            AssetRegistry (when running inside Unreal Editor).
+            """
+            try:
+                import unreal
+                ar = unreal.AssetRegistryHelpers.get_asset_registry()
+                dep_opts = unreal.AssetRegistryDependencyOptions(
+                    include_hard_package_references=True,
+                    include_soft_package_references=False,
+                    include_hard_management_references=False,
+                    include_soft_management_references=False,
+                    include_searchable_names=False,
+                )
+            except Exception:
+                return list(seed_paths)
+
+            seen: set[str] = set(p for p in seed_paths if p.startswith("/Game/"))
+            queue: list[str] = list(seen)
+            max_packages = 5000
+
+            while queue and len(seen) < max_packages:
+                curr = queue.pop(0)
+                try:
+                    deps = ar.get_dependencies(curr, dep_opts) or []
+                except Exception:
+                    deps = []
+                for dep in deps:
+                    dep_s = str(dep)
+                    if not dep_s.startswith("/Game/"):
+                        continue
+                    if dep_s in seen:
+                        continue
+                    seen.add(dep_s)
+                    queue.append(dep_s)
+
+            return sorted(seen)
+
+        def _copy_package_sidecars(pkg_path: str) -> bool:
+            rel = pkg_path[len("/Game/"):]
+            rel_path = Path(rel)
+            src_dir = src_root / "Content" / rel_path.parent
+            dst_dir = temp_content / rel_path.parent
+            base_name = rel_path.name
+            sidecars = sorted(src_dir.glob(f"{base_name}.*")) if src_dir.exists() else []
+            if not sidecars:
+                return False
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            for src in sidecars:
+                shutil.copy2(src, dst_dir / src.name)
+            return True
+
+        # Keep this path deterministic: copy/cook only explicitly requested
+        # targets. Dependency/bootstrap expansion caused broad unrelated cooks
+        # and obscured whether the requested package was actually processed.
+        expanded_paths = list(package_paths_local)
+        copied_paths: list[str] = []
+        missing_paths: list[str] = []
+        for pkg_path in expanded_paths:
+            if not pkg_path.startswith("/Game/"):
+                continue
+            ok = _copy_package_sidecars(pkg_path)
+            if pkg_path in package_paths_local:
+                if ok:
+                    copied_paths.append(pkg_path)
+                else:
+                    missing_paths.append(pkg_path)
+            elif ok:
+                # Dependency copied; no need to track for -PACKAGE.
+                pass
+
+        if expanded_paths and len(expanded_paths) > len(package_paths_local):
+            _log(
+                f"[JJK Core Cook] Expanded to {len(expanded_paths)} package(s) "
+                f"including dependencies."
+            )
+        for missing in missing_paths:
+            rel = missing[len('/Game/'):]
+            src_dir = src_root / "Content" / Path(rel).parent
+            _log_error(
+                f"[JJK Core Cook] Temp workspace: no source package files found for {missing} "
+                f"under {src_dir}"
+            )
+
+        # Some project/plugin defaults (e.g. ACL compression settings) are
+        # loaded very early and can crash cook if missing from /Game/Editor.
+        # Mirror these support assets into the temp workspace when present.
+        acl_src = src_root / "Content" / "Editor" / "ACLPlugin"
+        if acl_src.exists():
+            acl_dst = temp_content / "Editor" / "ACLPlugin"
+            acl_dst.mkdir(parents=True, exist_ok=True)
+            for src in acl_src.rglob("*"):
+                if src.is_file():
+                    rel = src.relative_to(acl_src)
+                    dst = acl_dst / rel
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+
+        if not copied_paths:
+            _log_error("[JJK Core Cook] Temp workspace contains no cookable target package files.")
+            return None
+
+        return temp_root, temp_project, copied_paths
+
     try:
-        ue_cmd       = _get_ue_editor_cmd()
-        project_file = _get_project_file()
+        ue_cmd = _get_ue_editor_cmd()
         project_root = _get_project_root()
     except RuntimeError as e:
         _log_error(str(e))
         return 1
 
-    # Join multiple packages with '+' (cook commandlet GetSwitchValueElements splits on '+')
-    pkg_arg = "+".join(package_paths)
+    prepared = _prepare_temp_core_cook_workspace(mod_name, valid_paths)
+    if prepared is None:
+        return 1
+    temp_root, temp_project_file, valid_paths = prepared
+    temp_project_name = temp_project_file.stem
+    _core_cook_output_content_by_mod[mod_name] = temp_root / "Saved" / "Cooked" / "Windows" / temp_project_name / "Content"
+
+    # Build explicit NeverCook removals for top-level game folders represented
+    # by the requested package paths, e.g. /Game/Widgets/Logo/WBP_Logo -> /Game/Widgets.
+    nevercook_removals: list[str] = []
+    cook_dirs: list[str] = []
+    cook_dirs_fs: list[str] = []
+    for pkg in valid_paths:
+        parts = [p for p in pkg.split("/") if p]
+        if len(parts) >= 2 and parts[0] == "Game":
+            top = f"/Game/{parts[1]}"
+            if top not in nevercook_removals:
+                nevercook_removals.append(top)
+        # Also pass explicit folder roots to force queueing in cook-by-the-book.
+        parent = "/Game/" + "/".join(parts[1:-1]) if len(parts) > 2 and parts[0] == "Game" else ""
+        if parent and parent not in cook_dirs:
+            cook_dirs.append(parent)
+            rel_parent = Path(*parts[1:-1])
+            fs_parent = str((temp_root / "Content" / rel_parent).resolve())
+            if fs_parent not in cook_dirs_fs:
+                cook_dirs_fs.append(fs_parent)
 
     cmd = [
         str(ue_cmd),
-        str(project_file),
+        str(temp_project_file),
         "-run=Cook",
         "-TargetPlatform=Windows",
-        f"-PACKAGE={pkg_arg}",
-        "-cooksinglepackagenorefs",
-        # Clear NeverCook block-list for this process only (file never written)
-        "-ini:Game:[/Script/UnrealEd.ProjectPackagingSettings]:!DirectoriesToNeverCook=()",
+        f"-PACKAGE={'+'.join(valid_paths)}",
+        # NOTE:
+        # Legacy single-package mode can suppress normal queue behavior in some
+        # projects and end up saving unrelated defaults instead of target /Game
+        # assets. We rely on explicit -PACKAGE plus narrow -CookDir roots below.
+        # Clear NeverCook directory filters for this process. UE ini array clear
+        # syntax must use ClearArray (not ()).
+        "-ini:Game:[/Script/UnrealEd.ProjectPackagingSettings]:!DirectoriesToNeverCook=ClearArray",
         # Prevent bCookAll=True (from DefaultGame.ini) from sweeping all content
         "-ini:Game:[/Script/UnrealEd.ProjectPackagingSettings]:bCookAll=False",
+        # Some game projects register PrimaryAssetTypes that depend on optional
+        # plugins (e.g. CRI Ware). In commandlet cook environments those plugin
+        # classes may be unavailable, which triggers handled ensures and can
+        # prevent any target package from being cooked. For explicit PACKAGE
+        # cooks we do not need Asset Manager scanning, so clear it per-process.
+        # NOTE: Array override syntax must use ClearArray in UE commandline ini
+        # overrides. Using =() does not reliably clear these arrays in 5.1.
+        "-ini:Game:[/Script/Engine.AssetManagerSettings]:!PrimaryAssetTypesToScan=ClearArray",
+        "-ini:Game:[/Script/Engine.AssetManagerSettings]:!PrimaryAssetRules=ClearArray",
+        "-ini:Engine:[/Script/Engine.AssetManagerSettings]:!PrimaryAssetTypesToScan=ClearArray",
+        "-ini:Engine:[/Script/Engine.AssetManagerSettings]:!PrimaryAssetRules=ClearArray",
         "-Unversioned",
         "-NoLogTimes",
         "-NoSplash",
         "-Unattended",
         "-NullRHI",
+        # Force loose cooked package output under Saved/Cooked/.../Content.
+        # Without these, UE5 may route output through package stores, yielding
+        # no loose files for the staging step.
+        "-NoZenStore",
+        "-SkipPackageStore",
+        "-NoIoStore",
+        # Keep cook scope tight to explicit targets.
+        "-NoGameAlwaysCook",
+        "-NoDefaultMaps",
+        "-NoAlwaysCookMaps",
+        "-NoInputPackages",
         "-stdout",
     ]
 
+    for top in nevercook_removals:
+        cmd.append(
+            f"-ini:Game:[/Script/UnrealEd.ProjectPackagingSettings]:"
+            f"-DirectoriesToNeverCook=(Path=\"{top}\")"
+        )
+    for cook_dir in cook_dirs:
+        cmd.append(f"-CookDir={cook_dir}")
+    for cook_dir_fs in cook_dirs_fs:
+        cmd.append(f"-CookDir={cook_dir_fs}")
+
     log_file = project_root / "log_core_cook.txt"
-    _log(f"[JJK Core Cook] {mod_name}: cooking {len(package_paths)} package(s)…")
+    _log(f"[JJK Core Cook] {mod_name}: cooking {len(valid_paths)} package(s)…")
+    _log(f"[JJK Core Cook] Script version: {_CORE_COOK_SCRIPT_VERSION}")
+    _log(f"[JJK Core Cook] Package target(s): {valid_paths}")
+    if nevercook_removals:
+        _log(f"[JJK Core Cook] NeverCook removals: {nevercook_removals}")
+    if cook_dirs:
+        _log(f"[JJK Core Cook] CookDir target(s): {cook_dirs}")
+    if cook_dirs_fs:
+        _log(f"[JJK Core Cook] CookDir filesystem target(s): {cook_dirs_fs}")
+    required_loose_flags = {"-NoZenStore", "-SkipPackageStore", "-NoIoStore"}
+    present_loose_flags = [f for f in cmd if f in required_loose_flags]
+    _log(f"[JJK Core Cook] Loose output flags present: {present_loose_flags}")
     _log("Command: " + " ".join(f'"{a}"' if " " in a else a for a in cmd))
     _log(f"Log → {log_file}")
 
     with open(log_file, "w", encoding="utf-8") as log_f:
         proc = subprocess.Popen(
             cmd,
-            cwd=str(project_root),
+            cwd=str(temp_root),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -1245,6 +1581,17 @@ def _cook_core_packages_for_mod(mod_name: str, package_paths: list) -> int:
             log_f.write(line)
         proc.wait()
         rc = proc.returncode
+
+    # Treat "no packages saved" as hard failure for core-package workflow.
+    try:
+        import re
+        text = log_file.read_text(encoding="utf-8", errors="ignore")
+        m = re.search(r"NumPackagesSaved=(\d+)", text)
+        if m and int(m.group(1)) == 0:
+            _log_error("[JJK Core Cook] Cook produced zero saved packages.")
+            return 2
+    except Exception:
+        pass
 
     if rc == 0:
         _log("[JJK Core Cook] Cook succeeded.")
@@ -1267,11 +1614,12 @@ def _stage_core_packages(mod_name: str, package_paths: list) -> int:
 
     Returns the number of files copied, or -1 on unrecoverable error.
     """
-    cooked_content = _get_cooked_dir() / "Content"
+    cooked_content = _core_cook_output_content_by_mod.get(mod_name, _get_cooked_dir() / "Content")
     game_mods_path = _get_game_mods_path()
     dest_assets    = game_mods_path / mod_name / "assets"
 
     copied = 0
+    had_missing = False
     for pkg_path in package_paths:
         # /Game/Characters/CP_010/AM_Foo → Characters/CP_010/AM_Foo
         if not pkg_path.startswith("/Game/"):
@@ -1284,6 +1632,7 @@ def _stage_core_packages(mod_name: str, package_paths: list) -> int:
 
         if not cooked_dir.exists():
             _log_error(f"[JJK Core Cook] Cooked directory not found: {cooked_dir}")
+            had_missing = True
             continue
 
         # Collect all files produced for this package (.uasset, .uexp, .ubulk, …)
@@ -1293,6 +1642,7 @@ def _stage_core_packages(mod_name: str, package_paths: list) -> int:
                 f"[JJK Core Cook] No cooked files found for  {pkg_path}  "
                 f"in  {cooked_dir}"
             )
+            had_missing = True
             continue
 
         for src in matched:
@@ -1354,7 +1704,7 @@ def cook_modded_game_assets() -> None:
             continue
 
         staged = _stage_core_packages(mod_name, package_paths)
-        if staged < 0:
+        if staged <= 0:
             errors.append(f"{mod_name}: staging failed")
         else:
             total_staged += staged
@@ -1378,6 +1728,137 @@ def cook_modded_game_assets() -> None:
             default_value = unreal.AppReturnType.OK,
         )
     except Exception:
+        pass
+
+
+def cook_modded_game_assets_async() -> None:
+    """
+    Asynchronous variant of cook_modded_game_assets().
+
+    Cooks/stages all assets listed in CorePackagesToCook on a worker thread and
+    reports completion on the game thread via Slate tick callback notifications.
+    """
+    import threading
+
+    state = _async_core_cook_state
+
+    if state["running"]:
+        _jjk_notify(
+            "[JJK Core Cook] Cook Modded Game Assets is already in progress — please wait.",
+            None,
+        )
+        return
+
+    entries = get_core_packages_to_cook()
+    if not entries:
+        try:
+            import unreal
+            unreal.EditorDialog.show_message(
+                title        = "Cook Modded Game Assets",
+                message      = (
+                    "No core packages are configured.\n\n"
+                    "Add assets via:\n"
+                    "  Right-click an asset → JJK Mod Kit → Add to Core Packages to Cook…\n\n"
+                    "or edit:\n"
+                    "  Edit → Project Settings → Plugins → JJK Mod Kit"
+                    " → Core Packages to Cook"
+                ),
+                message_type  = unreal.AppMsgType.OK,
+                default_value = unreal.AppReturnType.OK,
+            )
+        except Exception:
+            _log("[JJK Core Cook] No core packages configured.")
+        return
+
+    state["running"] = True
+    state["result"]  = None
+    state["message"] = ""
+
+    _jjk_notify(
+        "[JJK Core Cook] ⏳ Cook Modded Game Assets started — editor stays responsive. "
+        "Check the Output Log for progress.",
+        None,
+    )
+
+    def _worker() -> None:
+        total_staged = 0
+        errors: list[str] = []
+        try:
+            for entry in entries:
+                mod_name      = entry["mod_name"]
+                package_paths = entry["package_paths"]
+                if not mod_name or not package_paths:
+                    continue
+
+                rc = _cook_core_packages_for_mod(mod_name, package_paths)
+                if rc > 1:
+                    errors.append(f"{mod_name}: cook failed (exit {rc})")
+                    continue
+
+                staged = _stage_core_packages(mod_name, package_paths)
+                if staged <= 0:
+                    errors.append(f"{mod_name}: staging failed")
+                else:
+                    total_staged += staged
+                    _log(f"[JJK Core Cook] ✓ {mod_name}: staged {staged} file(s)")
+
+            if errors:
+                state["result"]  = False
+                state["message"] = (
+                    f"Cook & Stage completed with {len(errors)} error(s): "
+                    + "; ".join(errors)
+                    + f". Successfully staged {total_staged} file(s) total."
+                )
+            else:
+                state["result"]  = True
+                state["message"] = f"Done. Staged {total_staged} file(s) total."
+        except Exception as exc:
+            import traceback
+            state["result"]  = False
+            state["message"] = f"Unexpected error: {exc}\n{traceback.format_exc()}"
+        finally:
+            state["running"] = False
+
+    threading.Thread(target=_worker, daemon=True, name="JJKCoreCookThread").start()
+
+    try:
+        import unreal
+
+        def _on_tick(delta_seconds: float) -> None:  # noqa: ARG001
+            if state["running"]:
+                return
+
+            handle = state.get("tick_handle")
+            if handle is not None:
+                try:
+                    unreal.unregister_slate_post_tick_callback(handle)
+                except Exception:
+                    pass
+                state["tick_handle"] = None
+
+            result  = state["result"]
+            message = state["message"]
+            state["result"] = None
+
+            if result is True:
+                _jjk_notify(f"[JJK Core Cook] ✅ {message}", True)
+                unreal.EditorDialog.show_message(
+                    title        = "Cook Modded Game Assets",
+                    message      = message,
+                    message_type  = unreal.AppMsgType.OK,
+                    default_value = unreal.AppReturnType.OK,
+                )
+            elif result is False:
+                _jjk_notify(f"[JJK Core Cook] ❌ {message}", False)
+                unreal.EditorDialog.show_message(
+                    title        = "Cook Modded Game Assets",
+                    message      = message,
+                    message_type  = unreal.AppMsgType.OK,
+                    default_value = unreal.AppReturnType.OK,
+                )
+
+        state["tick_handle"] = unreal.register_slate_post_tick_callback(_on_tick)
+    except ImportError:
         pass
 
 

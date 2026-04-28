@@ -404,26 +404,64 @@ FString UBlueprintUncookerLibrary::UncookImpl(
 			Cast<UBlueprintGeneratedClass>(NewBP->GeneratedClass))
 		{
 			// ── 8a. Obtain the source CDO ────────────────────────────────
-			UObject* OrigCDO = BPGC->GetDefaultObject(/*bCreateIfNeeded=*/true);
+			// Prefer finding the CDO that was already deserialized as a package
+			// export rather than letting GetDefaultObject(true) create a brand-new
+			// blank object.  For cooked BPGCs the CDO export is named
+			// "Default__<ClassName>" inside the same package as the class.
+			FString CDOExportName = FString::Printf(TEXT("Default__%s"), *BPGC->GetName());
+			UObject* OrigCDO = FindObject<UObject>(BPGC->GetOutermost(), *CDOExportName);
+			if (!OrigCDO)
+			{
+				// Fall back: let the class create/return its CDO normally.
+				OrigCDO = BPGC->GetDefaultObject(/*bCreateIfNeeded=*/true);
+			}
 
 			// ── 8b. Force-preload if the CDO is still pending serialization ─
+			// After FullyLoad() the per-object linker reference is often cleared
+			// even when RF_NeedLoad is still set (cooked packages detach object
+			// linkers to save memory).  Fall back to the package-level linker so
+			// deferred CDO data is actually read from disk.
 			if (OrigCDO && OrigCDO->HasAnyFlags(RF_NeedLoad))
 			{
 				UE_LOG(LogTemp, Log,
 					TEXT("[BPUncooker] OrigCDO has RF_NeedLoad — force-preloading via linker for '%s'"),
 					*BPGC->GetName());
-				if (FLinkerLoad* Linker = OrigCDO->GetLinker())
+
+				FLinkerLoad* Linker = OrigCDO->GetLinker();
+
+				// Object linker may be null after FullyLoad — try the package linker.
+				if (!Linker)
+				{
+					Linker = FLinkerLoad::FindExistingLinkerForPackage(BPGC->GetOutermost());
+					if (Linker)
+					{
+						UE_LOG(LogTemp, Log,
+							TEXT("[BPUncooker] Per-object linker was null; using package linker for '%s'"),
+							*BPGC->GetName());
+					}
+				}
+
+				if (Linker)
 				{
 					Linker->Preload(OrigCDO);
 				}
 				else
 				{
-					// No linker (already in memory but not deserialized) — try
-					// forcing via the class regeneration path.
 					UE_LOG(LogTemp, Warning,
-						TEXT("[BPUncooker] OrigCDO has RF_NeedLoad but no linker for '%s' — CDO values may be missing"),
+						TEXT("[BPUncooker] OrigCDO has RF_NeedLoad but no linker found for '%s' — CDO values may be missing"),
 						*BPGC->GetName());
 				}
+			}
+
+			// Always call ConditionalPostLoad after any preload attempt.
+			// This mirrors UClass::CreateDefaultObject which calls PostLoadDefaultObject
+			// on the BPGC — rebuilding the CustomPropertyList and resolving the UPS
+			// (unversioned property serialization) archetype delta chain.  Without this,
+			// array/struct properties that differ from the parent CDO remain empty even
+			// when the linker preload succeeded.
+			if (OrigCDO)
+			{
+				OrigCDO->ConditionalPostLoad();
 			}
 
 			// ── 8c. Log RF_NeedLoad state for diagnosis ──────────────────
