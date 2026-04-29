@@ -9,4 +9,5 @@ UJJKModKitSettings::UJJKModKitSettings()
         "C:\\Program Files (x86)\\Steam\\steamapps\\common\\"
         "Jujutsu Kaisen CC\\Jujutsu Kaisen CC\\Binaries\\Win64\\Jujutsu Kaisen CC.exe"
     );
+    bKeepTempBuildFolders = false;
 }

@@ -90,6 +90,16 @@ public:
               meta=(DisplayName="UnrealEditor-Cmd Path (optional)", ToolTip="Full path to UnrealEditor-Cmd.exe. Leave blank to auto-detect from standard Epic Games install paths."))
     FString UeEditorCmdPath;
 
+    /**
+     * Keep temporary cook workspaces created under Saved/CoreCookTemp/.
+     * When disabled, temp build folders are deleted automatically after each
+     * cook job completes.
+     */
+    UPROPERTY(Config, EditAnywhere, Category="Cooking",
+              meta=(DisplayName="Keep Temp Build Folders",
+                    ToolTip="When enabled, temporary cook workspaces under Saved/CoreCookTemp are preserved for debugging.\nWhen disabled, they are deleted automatically after cook jobs finish."))
+    bool bKeepTempBuildFolders = false;
+
     // ── Core Packages to Cook ──────────────────────────────────────────────────
 
     /**

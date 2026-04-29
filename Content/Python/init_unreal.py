@@ -312,7 +312,7 @@ def _register_jjkcc_menu():
         type            = unreal.MultiBlockType.MENU_ENTRY,
         insert_position = unreal.ToolMenuInsert("", unreal.ToolMenuInsertType.DEFAULT),
     )
-    entry_cook_modded.set_label("Cook Modded Game Assets")
+    entry_cook_modded.set_label("Cook & Export Asset Override")
     entry_cook_modded.set_tool_tip(
         "Cook and stage individual game assets that live inside\n"
         "DirectoriesToNeverCook directories (replacement assets).\n\n"
