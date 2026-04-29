@@ -61,6 +61,132 @@ def _register_jjkcc_menu():
     )
     jjk_menu.add_menu_entry("Setup", entry_import)
 
+    # ── Section: Mod Management ─────────────────────────────────────────────
+    jjk_menu.add_section("ModManagement", "Mod Management")
+
+    entry_new_mod = unreal.ToolMenuEntry(
+        name            = "NewMod",
+        type            = unreal.MultiBlockType.MENU_ENTRY,
+        insert_position = unreal.ToolMenuInsert("", unreal.ToolMenuInsertType.DEFAULT),
+    )
+    entry_new_mod.set_label("New Mod")
+    entry_new_mod.set_tool_tip(
+        "Create a new mod folder under Content/Mods/.\n\n"
+        "A dialog will let you fill in the mod's title, description,\n"
+        "version, and priority.  The folder and manifest.json are\n"
+        "created automatically once you confirm."
+    )
+    entry_new_mod.set_string_command(
+        type        = unreal.ToolMenuStringCommandType.PYTHON,
+        custom_type = unreal.Name(""),
+        string      = (
+            "import importlib, mod_tools; "
+            "importlib.reload(mod_tools); "
+            "mod_tools.open_new_mod_dialog()"
+        ),
+    )
+    jjk_menu.add_menu_entry("ModManagement", entry_new_mod)
+
+    entry_edit_manifest = unreal.ToolMenuEntry(
+        name            = "EditModManifest",
+        type            = unreal.MultiBlockType.MENU_ENTRY,
+        insert_position = unreal.ToolMenuInsert("", unreal.ToolMenuInsertType.DEFAULT),
+    )
+    entry_edit_manifest.set_label("Edit Mods")
+    entry_edit_manifest.set_tool_tip(
+        "Edit the manifest.json for an existing mod.\n\n"
+        "Opens a picker so you can choose which mod to edit, then\n"
+        "shows the same form used when creating a new mod."
+    )
+    entry_edit_manifest.set_string_command(
+        type        = unreal.ToolMenuStringCommandType.PYTHON,
+        custom_type = unreal.Name(""),
+        string      = (
+            "import importlib, mod_tools; "
+            "importlib.reload(mod_tools); "
+            "mod_tools.open_edit_manifest_dialog()"
+        ),
+    )
+    jjk_menu.add_menu_entry("ModManagement", entry_edit_manifest)
+
+    # ── Section: Mod Cooking ────────────────────────────────────────────────
+    jjk_menu.add_section("ModCooking", "Mod Cooking")
+
+    entry_cook_all = unreal.ToolMenuEntry(
+        name            = "CookAllMods",
+        type            = unreal.MultiBlockType.MENU_ENTRY,
+        insert_position = unreal.ToolMenuInsert("", unreal.ToolMenuInsertType.DEFAULT),
+    )
+    entry_cook_all.set_label("Cook & Export All Mods")
+    entry_cook_all.set_tool_tip(
+        "Cook all mods under Content/Mods/ and copy the results to your\n"
+        "configured Mods Path. Set the output folder via JJK Mod Kit → Settings…"
+    )
+    entry_cook_all.set_string_command(
+        type        = unreal.ToolMenuStringCommandType.PYTHON,
+        custom_type = unreal.Name(""),
+        string      = (
+            "import importlib, mod_tools; "
+            "importlib.reload(mod_tools); "
+            "mod_tools.cook_and_stage_all_mods_async()"
+        ),
+    )
+    jjk_menu.add_menu_entry("ModCooking", entry_cook_all)
+
+    entry_cook_modded = unreal.ToolMenuEntry(
+        name            = "CookModdedGameAssets",
+        type            = unreal.MultiBlockType.MENU_ENTRY,
+        insert_position = unreal.ToolMenuInsert("", unreal.ToolMenuInsertType.DEFAULT),
+    )
+    entry_cook_modded.set_label("Cook & Export Asset Override")
+    entry_cook_modded.set_tool_tip(
+        "Cook and stage individual game assets that live inside\n"
+        "DirectoriesToNeverCook directories (replacement assets).\n\n"
+        "Assets are taken from the 'Core Packages to Cook' list in:\n"
+        "  Edit → Project Settings → Plugins → JJK Mod Kit\n\n"
+        "Add assets to the list by right-clicking them in the\n"
+        "Content Browser → JJK Mod Kit → Add to Core Packages to Cook…\n\n"
+        "Each package is cooked in isolation (bypassing NeverCook) then\n"
+        "processed asynchronously so the editor stays responsive.\n\n"
+        "Cooked files are\n"
+        "copied to:\n"
+        "  <game mods path>/<mod folder>/assets/<relative path under /Game>"
+    )
+    entry_cook_modded.set_string_command(
+        type        = unreal.ToolMenuStringCommandType.PYTHON,
+        custom_type = unreal.Name(""),
+        string      = (
+            "import importlib, mod_tools; "
+            "importlib.reload(mod_tools); "
+            "mod_tools.cook_modded_game_assets_async()"
+        ),
+    )
+    jjk_menu.add_menu_entry("ModCooking", entry_cook_modded)
+
+    # ── Section: Settings ───────────────────────────────────────────────────
+    jjk_menu.add_section("Settings", "Settings")
+
+    entry_settings = unreal.ToolMenuEntry(
+        name            = "ModKitSettings",
+        type            = unreal.MultiBlockType.MENU_ENTRY,
+        insert_position = unreal.ToolMenuInsert("", unreal.ToolMenuInsertType.DEFAULT),
+    )
+    entry_settings.set_label("Settings")
+    entry_settings.set_tool_tip(
+        "Open the Mod Kit config file to set your Mods output folder and\n"
+        "other preferences. Changes take effect on the next cook."
+    )
+    entry_settings.set_string_command(
+        type        = unreal.ToolMenuStringCommandType.PYTHON,
+        custom_type = unreal.Name(""),
+        string      = (
+            "import importlib, mod_tools; "
+            "importlib.reload(mod_tools); "
+            "mod_tools.open_settings_dialog()"
+        ),
+    )
+    jjk_menu.add_menu_entry("Settings", entry_settings)
+
     # ── Section: Asset Tools ────────────────────────────────────────────────
     jjk_menu.add_section("AssetTools", "Asset Tools")
 
@@ -234,129 +360,6 @@ def _register_jjkcc_menu():
         ),
     )
     jjk_menu.add_menu_entry("AssetTools", entry_restore_original)
-
-    # ── Section: Mod Management ─────────────────────────────────────────────
-    jjk_menu.add_section("ModManagement", "Mod Management")
-
-    entry_new_mod = unreal.ToolMenuEntry(
-        name            = "NewMod",
-        type            = unreal.MultiBlockType.MENU_ENTRY,
-        insert_position = unreal.ToolMenuInsert("", unreal.ToolMenuInsertType.DEFAULT),
-    )
-    entry_new_mod.set_label("New Mod")
-    entry_new_mod.set_tool_tip(
-        "Create a new mod folder under Content/Mods/.\n\n"
-        "A dialog will let you fill in the mod's title, description,\n"
-        "version, and priority.  The folder and manifest.json are\n"
-        "created automatically once you confirm."
-    )
-    entry_new_mod.set_string_command(
-        type        = unreal.ToolMenuStringCommandType.PYTHON,
-        custom_type = unreal.Name(""),
-        string      = (
-            "import importlib, mod_tools; "
-            "importlib.reload(mod_tools); "
-            "mod_tools.open_new_mod_dialog()"
-        ),
-    )
-    jjk_menu.add_menu_entry("ModManagement", entry_new_mod)
-
-    entry_edit_manifest = unreal.ToolMenuEntry(
-        name            = "EditModManifest",
-        type            = unreal.MultiBlockType.MENU_ENTRY,
-        insert_position = unreal.ToolMenuInsert("", unreal.ToolMenuInsertType.DEFAULT),
-    )
-    entry_edit_manifest.set_label("Edit Mods")
-    entry_edit_manifest.set_tool_tip(
-        "Edit the manifest.json for an existing mod.\n\n"
-        "Opens a picker so you can choose which mod to edit, then\n"
-        "shows the same form used when creating a new mod."
-    )
-    entry_edit_manifest.set_string_command(
-        type        = unreal.ToolMenuStringCommandType.PYTHON,
-        custom_type = unreal.Name(""),
-        string      = (
-            "import importlib, mod_tools; "
-            "importlib.reload(mod_tools); "
-            "mod_tools.open_edit_manifest_dialog()"
-        ),
-    )
-    jjk_menu.add_menu_entry("ModManagement", entry_edit_manifest)
-
-    # ── Section: Mod Cooking ────────────────────────────────────────────────
-    jjk_menu.add_section("ModCooking", "Mod Cooking")
-
-    entry_cook_all = unreal.ToolMenuEntry(
-        name            = "CookAllMods",
-        type            = unreal.MultiBlockType.MENU_ENTRY,
-        insert_position = unreal.ToolMenuInsert("", unreal.ToolMenuInsertType.DEFAULT),
-    )
-    entry_cook_all.set_label("Cook & Export All Mods")
-    entry_cook_all.set_tool_tip(
-        "Cook all mods under Content/Mods/ and copy the results to your\n"
-        "configured Mods Path. Set the output folder via JJK Mod Kit → Settings…"
-    )
-    entry_cook_all.set_string_command(
-        type        = unreal.ToolMenuStringCommandType.PYTHON,
-        custom_type = unreal.Name(""),
-        string      = (
-            "import importlib, mod_tools; "
-            "importlib.reload(mod_tools); "
-            "mod_tools.cook_and_stage_all_mods_async()"
-        ),
-    )
-    jjk_menu.add_menu_entry("ModCooking", entry_cook_all)
-
-    entry_cook_modded = unreal.ToolMenuEntry(
-        name            = "CookModdedGameAssets",
-        type            = unreal.MultiBlockType.MENU_ENTRY,
-        insert_position = unreal.ToolMenuInsert("", unreal.ToolMenuInsertType.DEFAULT),
-    )
-    entry_cook_modded.set_label("Cook & Export Asset Override")
-    entry_cook_modded.set_tool_tip(
-        "Cook and stage individual game assets that live inside\n"
-        "DirectoriesToNeverCook directories (replacement assets).\n\n"
-        "Assets are taken from the 'Core Packages to Cook' list in:\n"
-        "  Edit → Project Settings → Plugins → JJK Mod Kit\n\n"
-        "Add assets to the list by right-clicking them in the\n"
-        "Content Browser → JJK Mod Kit → Add to Core Packages to Cook…\n\n"
-        "Each package is cooked in isolation (bypassing NeverCook) then\n"
-        "processed asynchronously so the editor stays responsive.\n\n"
-        "Cooked files are\n"
-        "copied to:\n"
-        "  <game mods path>/<mod folder>/assets/<relative path under /Game>"
-    )
-    entry_cook_modded.set_string_command(
-        type        = unreal.ToolMenuStringCommandType.PYTHON,
-        custom_type = unreal.Name(""),
-        string      = (
-            "import importlib, mod_tools; "
-            "importlib.reload(mod_tools); "
-            "mod_tools.cook_modded_game_assets_async()"
-        ),
-    )
-    jjk_menu.add_menu_entry("ModCooking", entry_cook_modded)
-
-    entry_settings = unreal.ToolMenuEntry(
-        name            = "ModKitSettings",
-        type            = unreal.MultiBlockType.MENU_ENTRY,
-        insert_position = unreal.ToolMenuInsert("", unreal.ToolMenuInsertType.DEFAULT),
-    )
-    entry_settings.set_label("Settings")
-    entry_settings.set_tool_tip(
-        "Open the Mod Kit config file to set your Mods output folder and\n"
-        "other preferences. Changes take effect on the next cook."
-    )
-    entry_settings.set_string_command(
-        type        = unreal.ToolMenuStringCommandType.PYTHON,
-        custom_type = unreal.Name(""),
-        string      = (
-            "import importlib, mod_tools; "
-            "importlib.reload(mod_tools); "
-            "mod_tools.open_settings_dialog()"
-        ),
-    )
-    jjk_menu.add_menu_entry("ModCooking", entry_settings)
 
     menus.refresh_all_widgets()
     unreal.log("[JJK Mod Kit] Menu registered — 'JJK Mod Kit' dropdown available in the main menu bar.")
