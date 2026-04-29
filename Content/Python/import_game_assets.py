@@ -95,17 +95,11 @@ def _find_retoc() -> str:
     """
     Locate the retoc executable.
 
-    Search order:
-      1. <project root>/Tools/retoc.exe
-      2. System PATH  (retoc / retoc.exe)
+    Required location:
+      <project root>/Tools/retoc.exe
     """
     tools_retoc = _get_project_dir() / "Tools" / "retoc.exe"
-    if tools_retoc.exists():
-        return str(tools_retoc)
-    found = shutil.which("retoc") or shutil.which("retoc.exe")
-    if found:
-        return found
-    return "retoc"   # last resort — hope it is in PATH at subprocess time
+    return str(tools_retoc)
 
 
 def _delete_files_by_basename(folder: Path, pattern: re.Pattern) -> int:
