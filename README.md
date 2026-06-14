@@ -12,6 +12,9 @@
 2. Open the JJK Mod Kit menu and click 'Import Game Assets'
 3. 
 
+<img width="1167" height="1179" alt="image" src="https://github.com/user-attachments/assets/75ad880b-f9de-4b14-9e92-15566cd52a8c" />
+
+
 ## Recompiling the Project
 
 Run this command from any terminal **with the Unreal Editor closed** (or press **Ctrl+Alt+F11** inside the editor to Live-Compile without closing it):
