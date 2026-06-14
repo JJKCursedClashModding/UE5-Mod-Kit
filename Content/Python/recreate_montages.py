@@ -11,17 +11,16 @@ Why this is needed
 ------------------
 Game-extracted AnimMontages are serialised against the game engine build which
 has extra UPROPERTYs compared to stock UE 5.1.  Loading them triggers
-'SchemaIt != SchemaEnd' asserts.  Replacing each file with a fresh
-editor-created AnimMontage removes the schema mismatch while keeping the
-asset at the path that mod assets reference.
+'SchemaIt != SchemaEnd' asserts.  A fresh editor-created AnimMontage removes
+the schema mismatch while keeping all animation data intact.
 
 What Python does here
 ---------------------
   1. Walks the Content directory to find candidate .uasset files.
   2. Loads each asset and checks it is an AnimMontage with a readable skeleton.
-  3. Creates a fresh AnimMontage at a temporary path (same directory, name
-     suffixed '_jjktmp') using AnimMontageFactory so the editor registers it.
-   4. Calls  unreal.MontageBridgeLibrary.copy_montage_data(source, dest)
+  3. Creates a fresh AnimMontage in a RecreatedMontages subfolder beside the
+     source asset using AnimMontageFactory so the editor registers it.
+  4. Calls  unreal.MontageBridgeLibrary.copy_montage_data(source, dest)
      which performs the full deep copy in C++ (JJKModKit plugin):
        - SlotAnimTracks     (slot names → AnimSegment arrays → AnimSequence refs)
        - CompositeSections  (section names, start times, next-section links)
@@ -30,9 +29,7 @@ What Python does here
                              via FProperty reflection — no timing recalculation)
        - AnimNotifyTracks   (track label rows)
        - BlendIn / BlendOut / RateScale / AutoBlendOut settings
-   5. Deletes the cooked original.
-   6. Renames the temp asset to the original path.
-   7. Saves.
+  5. Saves the copy.  Original assets are left untouched.
 
 Python does NOT touch animation data — that is entirely owned by the C++ bridge.
 
@@ -55,8 +52,8 @@ import os
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
-ONLY_AM_PREFIX = True   # Set False to process every .uasset (non-standard names)
-_TEMP_SUFFIX   = '_jjktmp'
+ONLY_AM_PREFIX      = True   # Set False to process every .uasset (non-standard names)
+RECREATED_SUBFOLDER = 'RecreatedMontages'
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -80,9 +77,34 @@ def _disk_to_engine(disk_path: str, content_dir: str):
     return package_path, asset_name
 
 
+def _recreated_dest_path(source_engine_path: str) -> str:
+    """
+    Place a recreated copy in a sibling subfolder beside the source asset.
+
+    /Game/A/B/AM_Foo  →  /Game/A/B/RecreatedMontages/AM_Foo
+    """
+    folder = source_engine_path.rsplit('/', 1)[0]
+    name   = source_engine_path.split('/')[-1]
+    return f'{folder}/{RECREATED_SUBFOLDER}/{name}'
+
+
+def _ensure_output_folder(engine_folder: str) -> bool:
+    if unreal.EditorAssetLibrary.does_directory_exist(engine_folder):
+        return True
+    return unreal.EditorAssetLibrary.make_directory(engine_folder)
+
+
+def _is_recreated_output_path(engine_path: str) -> bool:
+    return f'/{RECREATED_SUBFOLDER}/' in engine_path.replace('\\', '/')
+
+
 def _find_montage_files(search_dir: str) -> list:
     results = []
+    subfolder_token = f'/{RECREATED_SUBFOLDER}/'
     for root, _dirs, files in os.walk(search_dir):
+        root_norm = root.replace('\\', '/')
+        if subfolder_token in root_norm:
+            continue
         for fname in files:
             if not fname.endswith('.uasset'):
                 continue
@@ -96,21 +118,36 @@ def _find_montage_files(search_dir: str) -> list:
 
 def _recreate_one(disk_path: str, content_dir: str, asset_tools) -> str:
     """
-    Recreate a single cooked AnimMontage.
+    Recreate a single cooked AnimMontage into a RecreatedMontages subfolder.
 
     Returns 'ok' | 'fail' | 'skipped' | 'unreadable'.
     """
     package_path, asset_name = _disk_to_engine(disk_path, content_dir)
-    engine_path      = f'{package_path}/{asset_name}'
-    temp_name        = asset_name + _TEMP_SUFFIX
-    temp_engine_path = f'{package_path}/{temp_name}'
+    engine_path = f'{package_path}/{asset_name}'
+
+    if _is_recreated_output_path(engine_path):
+        unreal.log(
+            f'[RecreateMontages]   Skipping — already in {RECREATED_SUBFOLDER}/: {engine_path}'
+        )
+        return 'skipped'
+
+    output_engine_path  = _recreated_dest_path(engine_path)
+    output_package_path = output_engine_path.rsplit('/', 1)[0]
 
     unreal.log(f'[RecreateMontages] Processing {engine_path}')
+    unreal.log(f'[RecreateMontages]   Output → {output_engine_path}')
 
-    # ── 0. Clean up any stale temp from a previous crashed run ────────────────
-    if unreal.EditorAssetLibrary.does_asset_exist(temp_engine_path):
-        unreal.log_warning(f'[RecreateMontages]   Stale temp found — deleting {temp_engine_path}')
-        unreal.EditorAssetLibrary.delete_asset(temp_engine_path)
+    # ── 0. Prepare destination ────────────────────────────────────────────────
+    if not _ensure_output_folder(output_package_path):
+        unreal.log_error(
+            f'[RecreateMontages]   Could not create folder: {output_package_path}'
+        )
+        return 'fail'
+    if unreal.EditorAssetLibrary.does_asset_exist(output_engine_path):
+        unreal.log_warning(
+            f'[RecreateMontages]   Existing copy found — replacing {output_engine_path}'
+        )
+        unreal.EditorAssetLibrary.delete_asset(output_engine_path)
 
     # ── 1. Load the existing asset ────────────────────────────────────────────
     try:
@@ -142,21 +179,21 @@ def _recreate_one(disk_path: str, content_dir: str, asset_tools) -> str:
         )
         return 'unreadable'
 
-    # ── 3. Create a clean AnimMontage at the TEMP path ────────────────────────
-    # Must happen BEFORE deleting 'existing' so the source stays valid in memory
-    # for the C++ bridge copy in step 4.
+    # ── 3. Create a clean AnimMontage at the output path ─────────────────────
     factory = unreal.AnimMontageFactory()
     factory.set_editor_property('target_skeleton', skeleton)
 
-    temp_montage = asset_tools.create_asset(
-        asset_name   = temp_name,
-        package_path = package_path,
+    new_montage = asset_tools.create_asset(
+        asset_name   = asset_name,
+        package_path = output_package_path,
         asset_class  = unreal.AnimMontage,
         factory      = factory,
     )
 
-    if temp_montage is None:
-        unreal.log_error(f'[RecreateMontages]   create_asset returned None for {temp_engine_path}.')
+    if new_montage is None:
+        unreal.log_error(
+            f'[RecreateMontages]   create_asset returned None for {output_engine_path}.'
+        )
         return 'fail'
 
     # ── 4. C++ deep copy ──────────────────────────────────────────────────────
@@ -171,54 +208,28 @@ def _recreate_one(disk_path: str, content_dir: str, asset_tools) -> str:
             '    Compile and enable the JJKModKit plugin, then reopen the editor.\n'
             '    See README.md for the build command.'
         )
-        unreal.EditorAssetLibrary.delete_asset(temp_engine_path)
+        unreal.EditorAssetLibrary.delete_asset(output_engine_path)
         return 'fail'
 
     try:
-        bridge.copy_montage_data(existing, temp_montage)
+        bridge.copy_montage_data(existing, new_montage)
     except Exception as e:
         unreal.log_error(f'[RecreateMontages]   copy_montage_data raised: {e}')
-        unreal.EditorAssetLibrary.delete_asset(temp_engine_path)
+        unreal.EditorAssetLibrary.delete_asset(output_engine_path)
         return 'fail'
 
-    # ── 5. Save the temp asset ────────────────────────────────────────────────
-    unreal.EditorAssetLibrary.save_asset(temp_engine_path, only_if_is_dirty=False)
+    # ── 5. Save the recreated asset ───────────────────────────────────────────
+    unreal.EditorAssetLibrary.save_asset(output_engine_path, only_if_is_dirty=False)
 
-    # ── 6. Delete the cooked original ────────────────────────────────────────
-    deleted_original = unreal.EditorAssetLibrary.delete_asset(engine_path)
-    if not deleted_original:
-        unreal.log_error(
-            f'[RecreateMontages]   delete original FAILED: {engine_path}\n'
-            f'    Aborting — original left untouched, temp stranded at {temp_engine_path}.'
-        )
-        unreal.EditorAssetLibrary.delete_asset(temp_engine_path)
-        return 'fail'
-
-    unreal.log(f'[RecreateMontages]   Deleted original: {engine_path}')
-
-    # ── 7. Rename temp → original path ───────────────────────────────────────
-    renamed = unreal.EditorAssetLibrary.rename_asset(temp_engine_path, engine_path)
-    if not renamed:
-        unreal.log_error(
-            f'[RecreateMontages]   rename_asset FAILED: {temp_engine_path} → {engine_path}\n'
-            f'    Replacement stranded at {temp_engine_path} — rename manually in Content Browser.'
-        )
-        return 'fail'
-
-    # ── 8. Save at final path ─────────────────────────────────────────────────
-    unreal.EditorAssetLibrary.save_asset(engine_path, only_if_is_dirty=False)
-
-    # ── 9. Post-rename timing check ───────────────────────────────────────────
-    # Reload the asset from its final path and log notify times so we can
-    # confirm that the rename / PostLoad cycle does not corrupt timing.
+    # ── 6. Post-save timing check ─────────────────────────────────────────────
     try:
-        renamed_montage = unreal.load_asset(engine_path)
-        if renamed_montage and isinstance(renamed_montage, unreal.AnimMontage):
-            bridge.log_notify_times(renamed_montage)
+        saved_montage = unreal.load_asset(output_engine_path)
+        if saved_montage and isinstance(saved_montage, unreal.AnimMontage):
+            bridge.log_notify_times(saved_montage)
     except Exception as e:
         unreal.log_warning(f'[RecreateMontages]   log_notify_times raised: {e}')
 
-    unreal.log(f'[RecreateMontages]   ✓ Recreated: {engine_path}')
+    unreal.log(f'[RecreateMontages]   ✓ Recreated: {output_engine_path}')
     return 'ok'
 
 
@@ -312,6 +323,9 @@ def run_on_selected_folder() -> None:
     Called from:
         Content Browser → right-click folder → JJK ModKit → Recreate Montages in Folder
 
+    Recreated assets are written to a RecreatedMontages subfolder beside each
+    source asset; originals are left untouched.
+
     Reads the selected folder via UEditorUtilityLibrary::GetSelectedFolderPaths()
     (→ IContentBrowserSingleton::GetSelectedFolders()).  The right-clicked folder
     is still selected while the context menu is open, so no dialog is normally
@@ -346,6 +360,9 @@ def run_on_selected_assets() -> None:
     The AM_* filename prefix filter (ONLY_AM_PREFIX) is intentionally bypassed —
     if you explicitly selected an asset for recreation, it is processed regardless
     of its name.
+
+    Recreated assets are written to a RecreatedMontages subfolder beside each
+    source asset; originals are left untouched.
     """
     try:
         selected = unreal.EditorUtilityLibrary.get_selected_assets()
@@ -420,6 +437,11 @@ def run_on_selected_assets() -> None:
         f'[RecreateMontages] ━━━ Complete ━━━  '
         f'recreated={ok}  skipped={skipped}  unreadable={unreadable}  failed={fail}'
     )
+    if ok:
+        unreal.log(
+            f'[RecreateMontages] Copies saved under each source folder\'s '
+            f'"{RECREATED_SUBFOLDER}/" subfolder.'
+        )
     if unreadable:
         unreal.log_warning(
             f'[RecreateMontages] {unreadable} asset(s) could not be loaded or had '
@@ -438,6 +460,9 @@ def run(search_root: str = '/Game') -> None:
     """
     Recreate all cooked AnimMontage assets found under *search_root*.
 
+    Copies are written to a RecreatedMontages subfolder beside each source
+    asset; originals are left untouched.
+
     Parameters
     ----------
     search_root : str
@@ -450,6 +475,7 @@ def run(search_root: str = '/Game') -> None:
     unreal.log('[RecreateMontages] Starting AnimMontage recreation pass')
     unreal.log(f'[RecreateMontages] Content dir  : {content_dir}')
     unreal.log(f'[RecreateMontages] Search root  : {search_root}')
+    unreal.log(f'[RecreateMontages] Output folder: {RECREATED_SUBFOLDER}/ (beside each source)')
     unreal.log(f'[RecreateMontages] Prefix filter : {"AM_* only" if ONLY_AM_PREFIX else "all .uasset"}')
 
     if getattr(unreal, 'MontageBridgeLibrary', None) is None:
@@ -495,6 +521,11 @@ def run(search_root: str = '/Game') -> None:
         f'[RecreateMontages] ━━━ Complete ━━━  '
         f'recreated={ok}  skipped={skipped}  unreadable={unreadable}  failed={fail}'
     )
+    if ok:
+        unreal.log(
+            f'[RecreateMontages] Copies saved under each source folder\'s '
+            f'"{RECREATED_SUBFOLDER}/" subfolder.'
+        )
     if unreadable:
         unreal.log_warning(
             f'[RecreateMontages] {unreadable} asset(s) could not be loaded or had no skeleton — '

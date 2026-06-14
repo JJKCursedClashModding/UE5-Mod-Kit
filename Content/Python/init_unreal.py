@@ -276,7 +276,9 @@ def _register_jjkcc_menu():
     entry2.set_label("Recreate Montages")
     entry2.set_tool_tip(
         "Scan Content/ and rebuild all AM_* AnimMontage assets so they work\n"
-        "correctly in the editor. Run this after importing game-extracted animations."
+        "correctly in the editor. Copies are saved to a RecreatedMontages subfolder\n"
+        "beside each source asset; originals are left untouched.\n"
+        "Run this after importing game-extracted animations."
     )
     entry2.set_string_command(
         type        = unreal.ToolMenuStringCommandType.PYTHON,
@@ -538,9 +540,10 @@ try:
         @unreal.ufunction(override=True)
         def get_tool_tip(self, context: unreal.ToolMenuContext) -> str:
             return (
-                "Rebuild the selected AnimMontage / AnimComposite asset(s) in-place.\n\n"
-                "Replaces game-extracted montages with clean, editor-compatible versions\n"
-                "while keeping all animation data (slots, notifies, blend times, etc.).\n\n"
+                "Rebuild the selected AnimMontage / AnimComposite asset(s).\n\n"
+                "Writes clean, editor-compatible copies into a RecreatedMontages\n"
+                "subfolder beside each source asset, leaving the originals untouched.\n"
+                "All animation data (slots, notifies, blend times, etc.) is preserved.\n\n"
                 "Non-montage assets in the selection are skipped."
             )
 
@@ -905,8 +908,9 @@ try:
         def get_tool_tip(self, context: unreal.ToolMenuContext) -> str:
             return (
                 "Rebuild all AM_* AnimMontage assets inside the selected folder.\n\n"
-                "Replaces game-extracted montages with clean, editor-compatible versions\n"
-                "while keeping all animation data."
+                "Writes clean, editor-compatible copies into a RecreatedMontages\n"
+                "subfolder beside each source asset, leaving the originals untouched.\n"
+                "All animation data (slots, notifies, blend times, etc.) is preserved."
             )
 
         @unreal.ufunction(override=True)
@@ -1241,6 +1245,8 @@ def _register_content_browser_context_menus():
             entry_folder.set_label("Recreate Montages in Folder")
             entry_folder.set_tool_tip(
                 "Rebuild all AM_* AnimMontage assets inside the selected folder.\n\n"
+                "Writes clean copies into a RecreatedMontages subfolder beside each\n"
+                "source asset, leaving the originals untouched.\n\n"
                 "A folder-picker dialog will open to confirm the target path."
             )
             entry_folder.set_string_command(
