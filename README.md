@@ -180,6 +180,24 @@ Some assets are known to be problematic even after stubbing. See **Developer Not
 Use the stub tools under **JJK Mod Kit → Asset Tools** rather than opening the original cooked versions.
 
 ### Recompiling the project
+<img width="1167" height="1179" alt="image" src="https://github.com/user-attachments/assets/75ad880b-f9de-4b14-9e92-15566cd52a8c" />
+
+<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/32b258b4-e4d4-4091-82aa-9e6283a7ed3d" />
+
+<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/8b76ca1c-6dfe-41a8-bdee-e7082d7b5094" />
+
+<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/16c1c450-3bb5-4d8a-bace-d32992caeea3" />
+
+<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/b9b4be63-0106-445e-89ac-90c497d37d8f" />
+
+<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/2a7fc4e1-5500-467d-902f-fbf2116df0dd" />
+
+<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/a008c9d4-e915-454e-9685-45f4ed6005f8" />
+
+<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/bd796a82-8fa3-4c15-aab1-1dbdfc3b40c9" />
+
+
+## Recompiling the Project
 
 Run this command from any terminal **with the Unreal Editor closed** (or press **Ctrl+Alt+F11** inside the editor to Live-Compile without closing it):
 
