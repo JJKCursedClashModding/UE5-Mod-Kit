@@ -48,6 +48,12 @@ public:
 		const FString& BlueprintName,
 		const TArray<FDecompiledFunction>& DecompiledFunctions);
 
+	/**
+	 * After compile, wire UWidget* CDO properties to the matching widgets in
+	 * WBP->WidgetTree by name.  Safe to call even when bindings are already set.
+	 */
+	static void RebindWidgetPropertiesFromTree(class UWidgetBlueprint* WBP);
+
 private:
 	FGraphBuilder(
 		UBlueprintGeneratedClass* InOriginalClass,

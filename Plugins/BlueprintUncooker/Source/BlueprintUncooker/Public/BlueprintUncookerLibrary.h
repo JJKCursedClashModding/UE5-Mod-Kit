@@ -113,16 +113,4 @@ public:
 		const FString& OutputBase      = TEXT("/Game/Uncooked"),
 		const FString& MountPointName  = TEXT(""),
 		bool bDryRun                   = false);
-
-private:
-	/** Shared implementation: resolves source, builds, compiles, saves. */
-	static FString UncookImpl(
-		const FString& SourceAssetPath,
-		const FString& OutputPath,
-		bool bChildClass);
-
-	/** Auto-derive output path from source if not specified. */
-	static FString DeriveOutputPath(
-		const FString& SourceAssetPath,
-		const FString& UserOutputPath);
 };

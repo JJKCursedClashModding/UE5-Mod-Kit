@@ -8,8 +8,6 @@ class UBlueprint;
 struct FAssetData;
 class FExtender;
 
-DECLARE_LOG_CATEGORY_EXTERN(LogBlueprintUncooker, Log, All);
-
 class FBlueprintUncookerModule : public IModuleInterface
 {
 public:
@@ -20,9 +18,6 @@ private:
 	TSharedRef<FExtender> ExtendContentBrowserMenu(const TArray<FAssetData>& SelectedAssets);
 	void ExecuteUncookBlueprint(TArray<FAssetData> SelectedAssets);
 	void ExecuteLiveUncook(TArray<FAssetData> SelectedAssets);
-
-	/** Resolves the UBlueprintGeneratedClass from an arbitrary asset (Blueprint, BPGC, or raw UClass). */
-	class UBlueprintGeneratedClass* ResolveGeneratedClass(const FAssetData& Asset);
 
 	FDelegateHandle ContentBrowserExtenderHandle;
 

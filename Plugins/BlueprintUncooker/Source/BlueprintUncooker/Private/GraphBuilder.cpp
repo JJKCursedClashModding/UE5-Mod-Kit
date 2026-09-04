@@ -55,6 +55,8 @@
 #include "Blueprint/WidgetTree.h"                    // UWidgetTree
 #include "WidgetBlueprint.h"                         // UWidgetBlueprint, FDelegateEditorBinding
 #include "Animation/WidgetAnimation.h"               // UWidgetAnimation — explicit dep (also transitively via WBPGC header)
+#include "Blueprint/UserWidget.h"                    // UUserWidget
+#include "Components/Widget.h"                       // UWidget
 
 DEFINE_LOG_CATEGORY(LogGraphBuilder);
 
@@ -411,6 +413,12 @@ UBlueprint* FGraphBuilder::BuildWidgetBlueprint(
 		return nullptr;
 	}
 
+	// ── Widget tree + bindings BEFORE skeleton generation ─────────────────
+	// GenerateBlueprintSkeleton (inside BuildBlueprintCore) needs the widget
+	// tree and BindWidget metadata to exist so parent-class widget properties
+	// (RootCanvasPanel, FirstPlayerInfo, …) are wired correctly at compile.
+	Builder.SetupWidgetTree(NewWBP);
+
 	// ── EventGraph + function graphs (identical to regular BP path) ───────
 	Builder.BuildBlueprintCore(NewWBP, false);
 
@@ -430,9 +438,6 @@ UBlueprint* FGraphBuilder::BuildWidgetBlueprint(
 			}
 		}
 	}
-
-	// ── Widget tree + bindings (WBP-specific) ─────────────────────────────
-	Builder.SetupWidgetTree(NewWBP);
 
 	return NewWBP;
 }
@@ -1035,6 +1040,61 @@ void FGraphBuilder::SetupWidgetTree(UBlueprint* BP)
 			TEXT("[BPUncooker] %d animation(s) reconstructed for '%s'"),
 			WBP->Animations.Num(), *WBP->GetName());
 	}
+}
+
+// ---------------------------------------------------------------------------
+// RebindWidgetPropertiesFromTree
+// ---------------------------------------------------------------------------
+
+void FGraphBuilder::RebindWidgetPropertiesFromTree(UWidgetBlueprint* WBP)
+{
+	if (!WBP || !WBP->GeneratedClass || !WBP->WidgetTree) return;
+
+	UObject* CDO = WBP->GeneratedClass->GetDefaultObject(/*bCreateIfNeeded=*/false);
+	if (!CDO) return;
+
+	TMap<FName, UWidget*> WidgetByName;
+	WBP->WidgetTree->ForEachWidget([&WidgetByName](UWidget* W)
+	{
+		if (W) WidgetByName.Add(W->GetFName(), W);
+	});
+
+	if (WidgetByName.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[BPUncooker] RebindWidgetPropertiesFromTree: WidgetTree is empty for '%s'"),
+			*WBP->GetName());
+		return;
+	}
+
+	int32 BoundCount = 0;
+	for (UClass* C = WBP->GeneratedClass; C && C != UUserWidget::StaticClass(); C = C->GetSuperClass())
+	{
+		for (TFieldIterator<FObjectProperty> PropIt(C, EFieldIteratorFlags::ExcludeSuper);
+			PropIt; ++PropIt)
+		{
+			FObjectProperty* Prop = *PropIt;
+			if (!Prop || !Prop->PropertyClass) continue;
+			if (!Prop->PropertyClass->IsChildOf(UWidget::StaticClass())) continue;
+
+			UWidget* const* Found = WidgetByName.Find(Prop->GetFName());
+			if (!Found || !*Found) continue;
+
+			void* Dst = Prop->ContainerPtrToValuePtr<void>(CDO);
+			if (Prop->GetObjectPropertyValue(Dst) != *Found)
+			{
+				Prop->SetObjectPropertyValue(Dst, *Found);
+				++BoundCount;
+				UE_LOG(LogTemp, Verbose,
+					TEXT("[BPUncooker] Rebound '%s::%s' → '%s'"),
+					*C->GetName(), *Prop->GetName(), *(*Found)->GetName());
+			}
+		}
+	}
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[BPUncooker] Rebound %d widget propert(ies) from WidgetTree for '%s'"),
+		BoundCount, *WBP->GetName());
 }
 
 // ---------------------------------------------------------------------------

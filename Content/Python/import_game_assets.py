@@ -63,7 +63,7 @@ def _get_paks_dir() -> Path:
         if cdo is not None:
             val = str(cdo.game_exe_path.file_path).strip()
             if val:
-                exe_path = Path(val)
+                exe_path = Path(mod_tools._absolute_os_path(val))
                 # <exe>/Win64/ → Binaries/ → <GameRoot>/ → Content/Paks
                 game_root = exe_path.parent.parent.parent
                 return (game_root / "Content" / "Paks").resolve()

@@ -53,6 +53,12 @@ class JJKMODKIT_API UJJKModKitSettings : public UDeveloperSettings
 public:
     UJJKModKitSettings();
 
+    virtual void PostInitProperties() override;
+
+#if WITH_EDITOR
+    virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
+
     //~ UDeveloperSettings interface
     virtual FName GetContainerName() const override { return TEXT("Project"); }
     virtual FName GetCategoryName()  const override { return TEXT("Plugins"); }
@@ -75,7 +81,7 @@ public:
     UPROPERTY(Config, EditAnywhere, Category="Cooking",
               meta=(DisplayName="Game Exe Path",
                     ToolTip="Path to Jujutsu Kaisen CC.exe.\nThe mods output folder is derived automatically as:\n  <exe folder>/../../Content/Mods\nClick '...' to browse.",
-                    FilePathFilter="Jujutsu Kaisen CC Executable|Jujutsu Kaisen CC.exe"))
+                    FilePathFilter="Executable (*.exe)|*.exe|Jujutsu Kaisen CC.exe|Jujutsu Kaisen CC.exe|All files (*.*)|*.*"))
     FFilePath GameExePath;
 
     /**
@@ -120,5 +126,8 @@ public:
               meta=(DisplayName="Core Packages to Cook",
                     ToolTip="Per-mod lists of game assets from DirectoriesToNeverCook to force-cook.\nRight-click any asset → JJK Mod Kit → Add to Core Packages to Cook…"))
     TArray<FModCorePackages> CorePackagesToCook;
+
+private:
+    void CanonicalizeStoredPaths();
 
 };

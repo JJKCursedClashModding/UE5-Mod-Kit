@@ -77,6 +77,29 @@ def _find_ue_editor_cmd() -> Path:
     )
 
 
+def _absolute_os_path(path: str) -> str:
+    """
+    Return an absolute filesystem path for a value stored on UJJKModKitSettings.
+
+    Unreal's default file picker may persist a path relative to
+    Engine/Binaries/Win64. pathlib would resolve that against the project
+    directory, and '..' cannot cross Windows drives. Convert through Unreal
+    first so engine-relative values round-trip to the original absolute path.
+    """
+    path = (path or "").strip()
+    if not path:
+        return ""
+    try:
+        import unreal
+        path = str(unreal.Paths.convert_relative_path_to_full(path)).strip()
+    except Exception:
+        pass
+    try:
+        return str(Path(path).expanduser().resolve())
+    except Exception:
+        return path
+
+
 # ─── Config (CDO only) ───────────────────────────────────────────────────────
 
 def _get_settings_cdo():
@@ -111,12 +134,12 @@ def load_config() -> dict:
     if cdo is None:
         return {}
     try:
-        exe_path = str(cdo.game_exe_path.file_path).strip()
+        exe_path = _absolute_os_path(str(cdo.game_exe_path.file_path))
     except Exception:
         exe_path = ""
     return {
         "game_exe_path":      exe_path,
-        "ue_editor_cmd_path": str(cdo.ue_editor_cmd_path).strip(),
+        "ue_editor_cmd_path": _absolute_os_path(str(cdo.ue_editor_cmd_path)),
         "keep_temp_build_folders": bool(getattr(cdo, "keep_temp_build_folders", False)),
     }
 
@@ -146,13 +169,16 @@ def save_config(config: dict) -> None:
         try:
             import unreal
             fp = unreal.FilePath()
-            fp.file_path = str(config["game_exe_path"])
+            fp.file_path = _absolute_os_path(str(config["game_exe_path"]))
             cdo.set_editor_property("game_exe_path", fp)
         except Exception as e:
             print(f"[JJK ModKit] save_config: could not set game_exe_path: {e}")
 
     if "ue_editor_cmd_path" in config:
-        cdo.set_editor_property("ue_editor_cmd_path", str(config["ue_editor_cmd_path"]))
+        cdo.set_editor_property(
+            "ue_editor_cmd_path",
+            _absolute_os_path(str(config["ue_editor_cmd_path"])),
+        )
 
     if "keep_temp_build_folders" in config:
         try:
@@ -188,7 +214,7 @@ def _get_game_mods_path() -> Path:
         except Exception:
             val = ""
         if val:
-            exe_path = Path(val)
+            exe_path = Path(_absolute_os_path(val))
             # Win64/ → Binaries/ → GameRoot/  then  Content/Mods
             game_root = exe_path.parent.parent.parent
             return (game_root / "Content" / "Mods").resolve()
@@ -203,7 +229,7 @@ def _get_ue_editor_cmd() -> Path:
     """Read UeEditorCmdPath from the UJJKModKitSettings CDO, auto-detect if blank."""
     cdo = _get_settings_cdo()
     if cdo is not None:
-        val = str(cdo.ue_editor_cmd_path).strip()
+        val = _absolute_os_path(str(cdo.ue_editor_cmd_path))
         if val:
             return Path(val)
     return _find_ue_editor_cmd()
