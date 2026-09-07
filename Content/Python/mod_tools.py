@@ -14,6 +14,7 @@ Usage (standalone CLI):
 from __future__ import annotations   # allows X | Y union hints on Python 3.9 (UE5.1)
 
 import sys
+import re
 import shutil
 import subprocess
 import json
@@ -81,23 +82,292 @@ def _absolute_os_path(path: str) -> str:
     """
     Return an absolute filesystem path for a value stored on UJJKModKitSettings.
 
-    Unreal's default file picker may persist a path relative to
-    Engine/Binaries/Win64. pathlib would resolve that against the project
-    directory, and '..' cannot cross Windows drives. Convert through Unreal
-    first so engine-relative values round-trip to the original absolute path.
+    Absolute paths (including other drives) are left alone. Relative values are
+    expanded through Unreal against Engine/Binaries/Win64, which is how the
+    stock file picker stores them.
     """
-    path = (path or "").strip()
+    path = (path or "").strip().strip('"')
     if not path:
         return ""
+    if _has_windows_drive(path) or path.startswith("\\\\"):
+        return path
     try:
         import unreal
-        path = str(unreal.Paths.convert_relative_path_to_full(path)).strip()
+        converted = str(unreal.Paths.convert_relative_path_to_full(path)).strip()
+        if converted:
+            return converted
     except Exception:
         pass
+    return path
+
+
+def _has_windows_drive(path: str) -> bool:
+    return len(path) >= 2 and path[1] == ":" and path[0].isalpha()
+
+
+def _is_default_steam_exe(path: Path) -> bool:
     try:
-        return str(Path(path).expanduser().resolve())
+        return path.resolve() == (_DEFAULT_STEAM_GAME_ROOT / _GAME_EXE_REL).resolve()
     except Exception:
-        return path
+        return str(path).replace("/", "\\").casefold() == str(
+            _DEFAULT_STEAM_GAME_ROOT / _GAME_EXE_REL
+        ).replace("/", "\\").casefold()
+
+
+def _file_path_setting_to_str(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip().strip('"')
+    for name in ("file_path", "FilePath"):
+        inner = getattr(value, name, None)
+        if inner:
+            return str(inner).strip().strip('"')
+    try:
+        inner = value.get_editor_property("file_path")
+        if inner:
+            return str(inner).strip().strip('"')
+    except Exception:
+        pass
+    text = str(value).strip()
+    match = re.search(r'FilePath\s*=\s*"([^"]*)"', text)
+    if match:
+        return match.group(1).replace("\\\\", "\\").strip()
+    return text.strip('"')
+
+
+def _read_game_exe_from_cdo() -> str:
+    cdo = _get_settings_cdo()
+    if cdo is None:
+        return ""
+    value = None
+    try:
+        value = cdo.get_editor_property("game_exe_path")
+    except Exception:
+        value = getattr(cdo, "game_exe_path", None)
+    return _file_path_setting_to_str(value)
+
+
+def _read_game_exe_from_ini_files() -> list[str]:
+    try:
+        import unreal
+        project = Path(
+            str(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_dir()))
+        )
+    except Exception:
+        try:
+            project = _get_project_root()
+        except Exception:
+            return []
+
+    inis = [
+        project / "Config" / "DefaultGame.ini",
+        project / "Saved" / "Config" / "WindowsEditor" / "Game.ini",
+        project / "Saved" / "Config" / "Windows" / "Game.ini",
+    ]
+    pattern = re.compile(r'GameExePath\s*=\s*\(\s*FilePath\s*=\s*"([^"]*)"', re.I)
+    found: list[str] = []
+    for ini in inis:
+        if not ini.is_file():
+            continue
+        try:
+            text = ini.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for match in pattern.finditer(text):
+            raw = match.group(1).replace("\\\\", "\\").strip()
+            if raw:
+                found.append(raw)
+    return found
+
+
+_GAME_NAME_LEAF = Path("Jujutsu Kaisen CC") / "Jujutsu Kaisen CC"
+_GAME_EXE_REL = Path("Binaries") / "Win64" / "Jujutsu Kaisen CC.exe"
+_DEFAULT_STEAM_GAME_ROOT = (
+    Path(r"C:\Program Files (x86)\Steam") / "steamapps" / "common" / _GAME_NAME_LEAF
+)
+
+
+def _configured_game_exe() -> Path | None:
+    """
+    Return the Game Exe Path the user configured.
+
+    Reads the live CDO and Config/Saved Game.ini copies. An existing
+    non-default exe always wins so a D: install cannot be replaced by the
+    hardcoded C: Steam path.
+    """
+    raw_values: list[str] = []
+    cdo_val = _read_game_exe_from_cdo()
+    if cdo_val:
+        raw_values.append(cdo_val)
+    raw_values.extend(_read_game_exe_from_ini_files())
+
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        abs_s = _absolute_os_path(raw)
+        if not abs_s:
+            continue
+        key = abs_s.replace("/", "\\").casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(Path(abs_s))
+
+    if not paths:
+        return None
+
+    existing_other = [p for p in paths if p.is_file() and not _is_default_steam_exe(p)]
+    if existing_other:
+        return existing_other[0]
+    existing = [p for p in paths if p.is_file()]
+    if existing:
+        return existing[0]
+    other = [p for p in paths if not _is_default_steam_exe(p)]
+    if other:
+        return other[0]
+    return paths[0]
+
+
+def _game_root_from_exe(exe: Path) -> Path:
+    """
+    Game root is normally <exe>/../../.. (Win64 → Binaries → game).
+
+    If that folder has no Content/Paks, walk up from the exe so a D: path
+    that isn't exactly Binaries/Win64 still finds the install.
+    """
+    conventional = exe.parent.parent.parent
+    if (conventional / "Content" / "Paks").is_dir():
+        return conventional
+    for parent in exe.parents:
+        if (parent / "Content" / "Paks").is_dir():
+            return parent
+    return conventional
+
+
+def _steam_install_path() -> Path | None:
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as key:
+            val, _ = winreg.QueryValueEx(key, "SteamPath")
+        path = Path(str(val))
+        if path.is_dir():
+            return path
+    except Exception:
+        pass
+    for candidate in (
+        Path(r"C:\Program Files (x86)\Steam"),
+        Path(r"C:\Program Files\Steam"),
+    ):
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _parse_steam_library_paths(vdf_text: str) -> list[Path]:
+    paths: list[Path] = []
+    for match in re.finditer(r'"path"\s+"([^"]+)"', vdf_text):
+        raw = match.group(1).replace("\\\\", "\\")
+        paths.append(Path(raw))
+    return paths
+
+
+def _steam_library_roots() -> list[Path]:
+    steam = _steam_install_path()
+    if steam is None:
+        return []
+    roots: list[Path] = [steam]
+    vdf = steam / "steamapps" / "libraryfolders.vdf"
+    if vdf.is_file():
+        try:
+            text = vdf.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            text = ""
+        for lib in _parse_steam_library_paths(text):
+            if lib not in roots:
+                roots.append(lib)
+    return [p for p in roots if p.is_dir()]
+
+
+def _iter_game_root_candidates() -> list[Path]:
+    seen: set[str] = set()
+    out: list[Path] = []
+
+    def _add(path: Path) -> None:
+        try:
+            key = str(path.resolve()).casefold()
+        except Exception:
+            key = str(path).casefold()
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+
+    exe = _configured_game_exe()
+    if exe is not None:
+        _add(_game_root_from_exe(exe))
+    for lib in _steam_library_roots():
+        _add(lib / "steamapps" / "common" / _GAME_NAME_LEAF)
+    _add(_DEFAULT_STEAM_GAME_ROOT)
+    return out
+
+
+def _is_usable_game_root(root: Path, *, require_paks: bool) -> bool:
+    paks = root / "Content" / "Paks"
+    if require_paks:
+        return paks.is_dir()
+    return (
+        (root / _GAME_EXE_REL).is_file()
+        or paks.is_dir()
+        or (root / "Content" / "Mods").is_dir()
+    )
+
+
+def _get_game_root(*, require_paks: bool = False) -> Path | None:
+    """
+    Locate the installed game root (the inner 'Jujutsu Kaisen CC' folder).
+
+    Prefers a Game Exe Path that actually exists, then Steam libraries on any
+    drive (from libraryfolders.vdf), then the default C: Steam path.
+    """
+    for root in _iter_game_root_candidates():
+        if _is_usable_game_root(root, require_paks=require_paks):
+            try:
+                return root.resolve()
+            except Exception:
+                return root
+    return None
+
+
+def _get_game_paks_dir() -> Path:
+    """
+    Return <GameRoot>/Content/Paks from the configured Game Exe Path.
+
+    A user-set path is always used, even if Paks is missing — the caller
+    shows that path in the error. Steam libraries are only consulted when
+    no Game Exe Path is configured.
+    """
+    exe = _configured_game_exe()
+    if exe is not None:
+        paks = _game_root_from_exe(exe) / "Content" / "Paks"
+        _log_game_path_choice(exe, paks)
+        return paks
+    root = _get_game_root(require_paks=True)
+    if root is None:
+        root = _get_game_root(require_paks=False)
+    if root is None:
+        root = _DEFAULT_STEAM_GAME_ROOT
+    paks = root / "Content" / "Paks"
+    _log_game_path_choice(None, paks)
+    return paks
+
+
+def _log_game_path_choice(exe: Path | None, paks: Path) -> None:
+    msg = f"[JJK ModKit] Game exe: {exe or '(not set)'}  →  Paks: {paks}"
+    try:
+        import unreal
+        unreal.log(msg)
+    except Exception:
+        print(msg)
 
 
 # ─── Config (CDO only) ───────────────────────────────────────────────────────
@@ -195,34 +465,16 @@ def save_config(config: dict) -> None:
 
 def _get_game_mods_path() -> Path:
     """
-    Derive the game's Content/Mods path from the GameExePath CDO setting.
-
-    The exe is expected at:
-        <GameRoot>/Binaries/Win64/Jujutsu Kaisen CC.exe
-
-    So the mods path is:
-        <GameRoot>/Content/Mods
-        = <exe folder>/../../Content/Mods
-
-    Falls back to the default Steam install path when the CDO is unavailable
-    or the exe path is blank.
+    Derive the game's Content/Mods path from the configured Game Exe Path.
+    Steam libraries are only used when no exe path is configured.
     """
-    cdo = _get_settings_cdo()
-    if cdo is not None:
-        try:
-            val = str(cdo.game_exe_path.file_path).strip()
-        except Exception:
-            val = ""
-        if val:
-            exe_path = Path(_absolute_os_path(val))
-            # Win64/ → Binaries/ → GameRoot/  then  Content/Mods
-            game_root = exe_path.parent.parent.parent
-            return (game_root / "Content" / "Mods").resolve()
-    # Fallback default
-    return Path(
-        r"C:\Program Files (x86)\Steam\steamapps\common"
-        r"\Jujutsu Kaisen CC\Jujutsu Kaisen CC\Content\Mods"
-    )
+    exe = _configured_game_exe()
+    if exe is not None:
+        return _game_root_from_exe(exe) / "Content" / "Mods"
+    root = _get_game_root(require_paks=False)
+    if root is None:
+        root = _DEFAULT_STEAM_GAME_ROOT
+    return root / "Content" / "Mods"
 
 
 def _get_ue_editor_cmd() -> Path:

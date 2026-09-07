@@ -54,6 +54,7 @@ void UJJKModKitSettings::PostEditChangeProperty(FPropertyChangedEvent& PropertyC
         || PropertyChangedEvent.GetPropertyName() == GET_MEMBER_NAME_CHECKED(FFilePath, FilePath))
     {
         CanonicalizeStoredPaths();
+        TryUpdateDefaultConfigFile();
     }
 }
 #endif

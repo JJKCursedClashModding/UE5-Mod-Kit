@@ -54,7 +54,8 @@ def _register_jjkcc_menu():
         type        = unreal.ToolMenuStringCommandType.PYTHON,
         custom_type = unreal.Name(""),
         string      = (
-            "import importlib, import_game_assets; "
+            "import importlib, mod_tools, import_game_assets; "
+            "importlib.reload(mod_tools); "
             "importlib.reload(import_game_assets); "
             "import_game_assets.run()"
         ),

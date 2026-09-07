@@ -53,26 +53,13 @@ _DATA_CONTENT_REL = Path("Jujutsu Kaisen CC") / "Content"
 
 def _get_paks_dir() -> Path:
     """
-    Derive  <GameRoot>/Content/Paks  from the GameExePath CDO setting.
-
-    Falls back to the default Steam install path when the CDO is unavailable.
+    Derive  <GameRoot>/Content/Paks  from the GameExePath setting, then from
+    Steam libraries on any drive.
     """
-    try:
-        import mod_tools
-        cdo = mod_tools._get_settings_cdo()
-        if cdo is not None:
-            val = str(cdo.game_exe_path.file_path).strip()
-            if val:
-                exe_path = Path(mod_tools._absolute_os_path(val))
-                # <exe>/Win64/ → Binaries/ → <GameRoot>/ → Content/Paks
-                game_root = exe_path.parent.parent.parent
-                return (game_root / "Content" / "Paks").resolve()
-    except Exception:
-        pass
-    return Path(
-        r"C:\Program Files (x86)\Steam\steamapps\common"
-        r"\Jujutsu Kaisen CC\Jujutsu Kaisen CC\Content\Paks"
-    )
+    import importlib
+    import mod_tools
+    importlib.reload(mod_tools)
+    return mod_tools._get_game_paks_dir()
 
 
 def _get_project_content_dir() -> Path:
@@ -202,11 +189,17 @@ def run() -> None:
 
     # ── Validate Paks directory ───────────────────────────────────────────────
     if not paks_dir.exists():
+        import mod_tools
+        exe = mod_tools._configured_game_exe()
+        exe_display = str(exe) if exe else "(not set)"
         unreal.EditorDialog.show_message(
             title="Import Game Assets — Error",
             message=(
                 f"Paks directory not found:\n{paks_dir}\n\n"
-                "Set the Game Exe Path in  JJK Mod Kit → Settings…"
+                f"Resolved from Game Exe Path:\n{exe_display}\n\n"
+                "This must be:\n"
+                "  …/Jujutsu Kaisen CC/Jujutsu Kaisen CC/Binaries/Win64/"
+                "Jujutsu Kaisen CC.exe"
             ),
             message_type=unreal.AppMsgType.OK,
             default_value=unreal.AppReturnType.OK,
