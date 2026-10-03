@@ -90,7 +90,7 @@ This is a one-time step that unpacks the game's cooked pak files and copies them
 2. Go to **JJK Mod Kit → Setup → Import Game Assets**.
 3. Read the confirmation dialog and click **Yes**.
 
-The pipeline runs five phases:
+The pipeline runs six phases:
 
 | Phase | What it does |
 |---|---|
@@ -99,6 +99,7 @@ The pipeline runs five phases:
 | 3 | Deletes the original ABP files from the extracted data (they crash the editor if imported as-is) |
 | 4 | Deletes three character-capture widget files that also crash the editor |
 | 5 | Moves the remaining extracted content into the project's `Content/` folder |
+| 6 | **BindWidget mass repair** — scans every imported Widget Blueprint and auto-patches `Source/**/*.h` to add missing `meta=(BindWidget)` (variable widgets only). If it reports patched headers, **rebuild** (`build.ps1`) before cooking any Widget override |
 
 **Expect the editor to be mostly unresponsive during phase 1.** The whole process typically takes 5–15 minutes and uses ~50 GB of temporary disk space under the game's `Content/Paks/Data/` folder (cleaned up automatically at the end).
 
@@ -178,6 +179,28 @@ Some assets are known to be problematic even after stubbing. See **Developer Not
 - `Content/Widgets/Commons/WBP_CharacterCaptureSimple`
 
 Use the stub tools under **JJK Mod Kit → Asset Tools** rather than opening the original cooked versions.
+
+### Uncooked widget animations with custom sequencer tracks
+
+Game widgets whose animations use the custom `AbramsSequencer*` tracks (for example
+`WBP_FreeBattleTeamCharacterSelect`) need care when uncooked and re-cooked:
+
+- The editor never keeps cooked MovieScene compiled data; re-cooking an uncooked asset
+  regenerates it. The reconstructed `Source/Framework` track classes now implement
+  `IMovieSceneTrackTemplateProducer` so the `F<Section>Evaluate` templates are regenerated
+  correctly (see `Source/Framework/Private/SequencerTrackBase.cpp`).
+  **Rebuild the project** (`build.ps1`, or Ctrl+Alt+F11) before the next cook so the cooked
+  binaries contain this change.
+- Opening an uncooked animation used to assert in `FSequencer::GetTrackEditor`
+  ("Unable to find a track editor ..."). `Source/AbramsEd` now registers a generic stub
+  track editor for every `USequencerTrackBase`-derived track, so animations can be opened.
+- **Cook & Export Asset Overrides** now verifies each staged package with
+  `Content/Python/cooked_asset_guard.py`. If a cooked package loses serialized
+  `/Script/...Evaluate` templates, staging is refused with an explicit error instead of
+  writing a broken override. Baselines are captured automatically at uncook time into
+  `Saved/AssetBaselines/`.
+
+Background and evidence: `Saved/uncooker_investigation_report.md`.
 
 ### Recompiling the project
 <img width="1167" height="1179" alt="image" src="https://github.com/user-attachments/assets/75ad880b-f9de-4b14-9e92-15566cd52a8c" />

@@ -12,10 +12,10 @@ class ABRAMS_API UGameVsEnemyEquipmentSelectTileViewWidget : public UGameWidgetR
     GENERATED_BODY()
 public:
 protected:
-    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true))
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true, BindWidget))
     UGameVsEnemyEquipmentCategorySelectWidget* CategorySelectWidget;
     
-    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true))
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true, BindWidget))
     UGameItemDescriptionTextWidget* ItemDescriptionText;
     
 private:

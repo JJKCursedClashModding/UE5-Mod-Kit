@@ -1,9 +1,13 @@
 #include "BlueprintUncookerLibrary.h"
 
 #include "BlueprintUncookerCore.h"
+#include "BindWidgetHeaderPatcher.h"
 
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "Blueprint/WidgetBlueprintGeneratedClass.h"
+#include "Blueprint/WidgetTree.h"
+#include "Components/Widget.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 
@@ -233,4 +237,80 @@ FString UBlueprintUncookerLibrary::UncookExternalFolder(
 	}
 
 	return FString::Printf(TEXT("%d/%d succeeded."), Succeeded, Total);
+}
+
+// ---------------------------------------------------------------------------
+// Persistent BindWidget repair — see BindWidgetHeaderPatcher.h for why the
+// transient stamp alone cannot survive the cook subprocess.
+// ---------------------------------------------------------------------------
+
+FString UBlueprintUncookerLibrary::EnsureBindWidgetHeaders(const FString& SourceAssetPath)
+{
+	UBlueprintGeneratedClass* BPGC = FBlueprintUncookerCore::ResolveClassFromPath(SourceAssetPath);
+	if (!BPGC)
+	{
+		return FString::Printf(TEXT("ERROR: Could not resolve UBlueprintGeneratedClass from '%s'"), *SourceAssetPath);
+	}
+
+	UWidgetBlueprintGeneratedClass* WBPGC = Cast<UWidgetBlueprintGeneratedClass>(BPGC);
+	if (!WBPGC)
+	{
+		return FString::Printf(TEXT("ERROR: '%s' is not a Widget Blueprint (resolved %s)"),
+			*SourceAssetPath, *BPGC->GetName());
+	}
+
+	UWidgetTree* Tree = WBPGC->GetWidgetTreeArchetype();
+	if (!Tree)
+	{
+		return FString::Printf(TEXT("ERROR: WidgetTree is null for '%s'"), *SourceAssetPath);
+	}
+
+	const FBindWidgetPatchResult R =
+		FBindWidgetHeaderPatcher::EnsureBindWidgetFromTree(BPGC->GetSuperClass(), Tree);
+
+	FString Status = FString::Printf(
+		TEXT("Stamped:%d HeadersPatched:%d Properties:%d AlreadyOnDisk:%d Unpatchable:%d"),
+		R.StampedTransient, R.HeadersPatched, R.PropertiesNeedingRebuild,
+		R.AlreadyOnDisk, R.Unpatchable);
+	if (R.Messages.Num() > 0)
+	{
+		Status += TEXT("\n") + FString::Join(R.Messages, TEXT("\n"));
+	}
+	if (R.HeadersPatched > 0)
+	{
+		Status += TEXT("\nREBUILD REQUIRED: run build.ps1 (or Ctrl+Alt+F11) before recooking.");
+	}
+	return Status;
+}
+
+FString UBlueprintUncookerLibrary::ValidateWidgetBindings(const FString& SourceAssetPath)
+{
+	UBlueprintGeneratedClass* BPGC = FBlueprintUncookerCore::ResolveClassFromPath(SourceAssetPath);
+	if (!BPGC)
+	{
+		return FString::Printf(TEXT("ERROR: Could not resolve UBlueprintGeneratedClass from '%s'"), *SourceAssetPath);
+	}
+
+	UWidgetBlueprintGeneratedClass* WBPGC = Cast<UWidgetBlueprintGeneratedClass>(BPGC);
+	if (!WBPGC)
+	{
+		return FString::Printf(TEXT("ERROR: '%s' is not a Widget Blueprint"), *SourceAssetPath);
+	}
+
+	UWidgetTree* Tree = WBPGC->GetWidgetTreeArchetype();
+	if (!Tree)
+	{
+		return FString::Printf(TEXT("ERROR: WidgetTree is null for '%s'"), *SourceAssetPath);
+	}
+
+	const TArray<FString> Missing =
+		FBindWidgetHeaderPatcher::FindMissingBindWidgetPropertiesFromTree(BPGC->GetSuperClass(), Tree);
+
+	if (Missing.Num() == 0)
+	{
+		return TEXT("OK: all C++ parent widget properties carry BindWidget/BindWidgetOptional.");
+	}
+	return TEXT("MISSING BindWidget — cook now WILL produce a corrupt package (Serial size mismatch at load):\n")
+		+ FString::Join(Missing, TEXT("\n"))
+		+ TEXT("\nRun EnsureBindWidgetHeaders then rebuild before cooking.");
 }

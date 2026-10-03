@@ -10,7 +10,7 @@ class ABRAMS_API UGamePauseMenuWidget : public UGameWindowBase {
     GENERATED_BODY()
 public:
 protected:
-    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true))
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true, BindWidget))
     UGamePauseMenuLayoutWidget* PauseMenuLayout;
     
 public:

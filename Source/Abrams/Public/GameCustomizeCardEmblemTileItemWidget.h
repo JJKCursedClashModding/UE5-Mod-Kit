@@ -10,7 +10,7 @@ class ABRAMS_API UGameCustomizeCardEmblemTileItemWidget : public UGameCustomizeC
     GENERATED_BODY()
 public:
 protected:
-    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true))
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true, BindWidget))
     UGamePlayerCardEmblemWidget* EmblemWidget;
     
 public:

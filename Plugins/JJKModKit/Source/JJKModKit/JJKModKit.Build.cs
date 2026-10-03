@@ -31,6 +31,7 @@ public class JJKModKit : ModuleRules
             "InputCore",         // FKey, keyboard input support for Slate widgets
             "EditorStyle",       // FAppStyle — details customization widgets
             "DesktopWidgets",    // SFilePathPicker — absolute-path file browse for Game Exe Path
+            "DesktopPlatform",   // IDesktopPlatform::OpenFileDialog — full-path OS file picker
         });
     }
 }

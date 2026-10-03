@@ -42,13 +42,14 @@ def _register_jjkcc_menu():
     entry_import.set_label("Import Game Assets")
     entry_import.set_tool_tip(
         "Run the full game-asset import pipeline:\n\n"
-        "  1. Convert pak files to legacy format  (retoc)\n"
-        "  2. Create AnimBlueprint stubs from extracted content\n"
-        "  3. Delete ABP_* / *_ABP files from the Data folder\n"
-        "  4. Delete 3 character-capture WBPs from Data/.../Widgets/Commons\n"
-        "  5. Move the extracted content into the project Content/ folder\n\n"
+        "  1. Pick Jujutsu Kaisen CC.exe or a game .pak file\n"
+        "  2. Convert pak files to legacy format  (retoc)\n"
+        "  3. Create AnimBlueprint stubs from extracted content\n"
+        "  4. Delete ABP_* / *_ABP files from the Data folder\n"
+        "  5. Delete 3 character-capture WBPs from Data/.../Widgets/Commons\n"
+        "  6. Move the extracted content into the project Content/ folder\n\n"
         "⚠  Uses ~50 GB of disk space and takes a long time.\n"
-        "A confirmation dialog is shown before anything is changed."
+        "A file picker and confirmation dialog are shown first."
     )
     entry_import.set_string_command(
         type        = unreal.ToolMenuStringCommandType.PYTHON,
@@ -61,6 +62,33 @@ def _register_jjkcc_menu():
         ),
     )
     jjk_menu.add_menu_entry("Setup", entry_import)
+
+    entry_repair_widgets = unreal.ToolMenuEntry(
+        name            = "RepairWidgetBindings",
+        type            = unreal.MultiBlockType.MENU_ENTRY,
+        insert_position = unreal.ToolMenuInsert("", unreal.ToolMenuInsertType.DEFAULT),
+    )
+    entry_repair_widgets.set_label("Repair Widget Bindings (all widgets)")
+    entry_repair_widgets.set_tool_tip(
+        "BindWidget mass repair for every imported Widget Blueprint:\n\n"
+        "  • Applies the transient in-memory stamp (current session compiles)\n"
+        "  • Auto-patches Source/**/*.h to add missing meta=(BindWidget)\n"
+        "    (variable widgets only — structural widgets are left alone)\n\n"
+        "Same repair the import pipeline runs as Phase 6. Run this once after\n"
+        "rebuilding with the updated BlueprintUncooker plugin, then REBUILD\n"
+        "again (close editor → build.ps1) if it reports patched headers.\n"
+        "Steady state is silent — reruns report everything already clean."
+    )
+    entry_repair_widgets.set_string_command(
+        type        = unreal.ToolMenuStringCommandType.PYTHON,
+        custom_type = unreal.Name(""),
+        string      = (
+            "import importlib, fix_widget_bindings; "
+            "importlib.reload(fix_widget_bindings); "
+            "fix_widget_bindings.fix_all_widgets()"
+        ),
+    )
+    jjk_menu.add_menu_entry("Setup", entry_repair_widgets)
 
     # ── Section: Mod Management ─────────────────────────────────────────────
     jjk_menu.add_section("ModManagement", "Mod Management")
@@ -151,7 +179,9 @@ def _register_jjkcc_menu():
         "processed asynchronously so the editor stays responsive.\n\n"
         "Cooked files are\n"
         "copied to:\n"
-        "  <game mods path>/<mod folder>/assets/<relative path under /Game>"
+        "  <game mods path>/<mod folder>/assets/<relative path under /Game>\n\n"
+        "Staged packages are verified first: an override that lost\n"
+        "sequencer custom-track evaluation data is refused, not exported."
     )
     entry_cook_modded.set_string_command(
         type        = unreal.ToolMenuStringCommandType.PYTHON,
@@ -225,9 +255,10 @@ def _register_jjkcc_menu():
         "  • WBP_CharacterCaptureEnemy\n"
         "  • WBP_CharacterCapturePlayer\n"
         "  • WBP_CharacterCaptureSimple\n\n"
-        "Each stub is a minimal UserWidget placed at\n"
-        "/Game/Widgets/Commons/ — use this after importing game assets\n"
-        "to prevent editor crashes caused by missing widget references."
+        "Each stub duplicates WBP_CharacterCapture (surviving sibling)\n"
+        "under the target name — complete, cook-safe packages. Stubs exist\n"
+        "only so dependent cooks resolve the import; the game keeps using\n"
+        "the stock originals at runtime."
     )
     entry_stub_wbp.set_string_command(
         type        = unreal.ToolMenuStringCommandType.PYTHON,

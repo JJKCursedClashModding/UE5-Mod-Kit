@@ -30,4 +30,24 @@ public:
      */
     UFUNCTION(BlueprintCallable, Category = "JJK Mod Kit|Settings")
     static void OpenJJKModKitSettings();
+
+    /**
+     * Open a native OS file picker and return the selected path.
+     *
+     * Unlike UE 5.1's stock FFilePath picker, this always returns an absolute
+     * path (including files on another drive). Cancel returns an empty string.
+     *
+     * DefaultDirectory may be a folder or an existing file (the file's folder
+     * is used as the starting directory). FileTypeFilter uses UE's pipe format:
+     *   "Executable (*.exe)|*.exe|Pak (*.pak)|*.pak|All files (*.*)|*.*"
+     *
+     * Python:
+     *   path = unreal.JJKModKitLibrary.open_file_picker(title, start, filter)
+     */
+    UFUNCTION(BlueprintCallable, Category = "JJK Mod Kit|Dialogs")
+    static FString OpenFilePicker(
+        const FString& DialogTitle,
+        const FString& DefaultDirectory,
+        const FString& FileTypeFilter
+    );
 };

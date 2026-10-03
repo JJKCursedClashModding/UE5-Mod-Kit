@@ -10,7 +10,7 @@ class ABRAMS_API UGameStampListViewItemWidget : public UGameChatListViewItemWidg
     GENERATED_BODY()
 public:
 protected:
-    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true))
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true, BindWidget))
     UGameWidgetImage* Stamp;
     
 public:

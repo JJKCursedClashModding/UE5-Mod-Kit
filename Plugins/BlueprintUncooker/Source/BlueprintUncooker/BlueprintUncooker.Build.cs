@@ -34,6 +34,7 @@ public class BlueprintUncooker : ModuleRules
 			"Projects",
 			"UMG",       // UWidgetBlueprintGeneratedClass, UWidgetTree, FDelegateRuntimeBinding
 			"UMGEditor", // UWidgetBlueprint, FDelegateEditorBinding
+			"PropertyPath", // FCachedPropertyPath / FPropertyPathSegment (runtime binding source paths)
 		});
 	}
 }

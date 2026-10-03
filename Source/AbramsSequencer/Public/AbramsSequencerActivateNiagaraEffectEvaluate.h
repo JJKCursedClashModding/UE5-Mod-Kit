@@ -8,5 +8,8 @@ struct ABRAMSSEQUENCER_API FAbramsSequencerActivateNiagaraEffectEvaluate : publi
     GENERATED_BODY()
 public:
     FAbramsSequencerActivateNiagaraEffectEvaluate();
+
+private:
+    virtual UScriptStruct& GetScriptStructImpl() const override { return *StaticStruct(); }
 };
 

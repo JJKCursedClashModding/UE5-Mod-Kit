@@ -8,7 +8,8 @@ public class AbramsEd : ModuleRules
         PrivateDependencyModuleNames.AddRange(new string[]
         {
             "Core", "CoreUObject", "Engine", "UnrealEd",
-            "Abrams", "AbramsDataTable", "Framework"
+            "Abrams", "AbramsDataTable", "Framework",
+            "MovieScene", "MovieSceneTracks", "Sequencer", "Slate", "SlateCore"
         });
     }
 }

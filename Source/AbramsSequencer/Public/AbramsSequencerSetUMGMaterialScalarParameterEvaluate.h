@@ -8,5 +8,8 @@ struct ABRAMSSEQUENCER_API FAbramsSequencerSetUMGMaterialScalarParameterEvaluate
     GENERATED_BODY()
 public:
     FAbramsSequencerSetUMGMaterialScalarParameterEvaluate();
+
+private:
+    virtual UScriptStruct& GetScriptStructImpl() const override { return *StaticStruct(); }
 };
 

@@ -4,14 +4,15 @@ import_game_assets.py
 Unreal Editor Python script.
 
 Performs the full game-asset import pipeline in one click:
-  1. Run retoc to convert cooked pak files to legacy format  (Paks/Data)
-  2. Create AnimBlueprint stubs for every ABP_* / *_ABP asset in the Data folder
-  3. Delete every ABP_* / *_ABP file from the Data folder (disk-level cleanup)
-  4. Delete the three character-capture WBPs from Data/.../Widgets/Commons
-  5. Copy the extracted Data content tree into the project Content/ folder
+  1. Ask the user to pick Jujutsu Kaisen CC.exe or a game .pak file
+  2. Run retoc to convert cooked pak files to legacy format  (Paks/Data)
+  3. Create AnimBlueprint stubs for every ABP_* / *_ABP asset in the Data folder
+  4. Delete every ABP_* / *_ABP file from the Data folder (disk-level cleanup)
+  5. Delete the three character-capture WBPs from Data/.../Widgets/Commons
+  6. Copy the extracted Data content tree into the project Content/ folder
 
 ⚠  This operation uses ~50 GB of disk space and can take a long time.
-   A confirmation dialog is shown before anything is changed.
+   A file picker and confirmation dialog are shown before anything is changed.
 
 Run via:  JJK ModKit → Asset Tools → Import Game Assets…
      or:  import import_game_assets; import_game_assets.run()
@@ -51,15 +52,223 @@ _DATA_CONTENT_REL = Path("Jujutsu Kaisen CC") / "Content"
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-def _get_paks_dir() -> Path:
-    """
-    Derive  <GameRoot>/Content/Paks  from the GameExePath setting, then from
-    Steam libraries on any drive.
-    """
+_FILE_PICKER_FILTER_UE = (
+    "Game executable or pak (*.exe;*.pak)|*.exe;*.pak|"
+    "Jujutsu Kaisen CC.exe|Jujutsu Kaisen CC.exe|"
+    "Pak files (*.pak)|*.pak|"
+    "All files (*.*)|*.*"
+)
+
+# Windows GetOpenFileNameW filter: pairs of (label, pattern) joined by \0, then a final \0.
+_FILE_PICKER_FILTER_WIN = (
+    "Game executable or pak (*.exe;*.pak)\0*.exe;*.pak\0"
+    "Jujutsu Kaisen CC.exe\0Jujutsu Kaisen CC.exe\0"
+    "Pak files (*.pak)\0*.pak\0"
+    "All files (*.*)\0*.*\0\0"
+)
+
+
+def _default_browse_path() -> str:
+    """Best existing exe / paks path to open the file picker in, or ''."""
     import importlib
     import mod_tools
     importlib.reload(mod_tools)
-    return mod_tools._get_game_paks_dir()
+
+    exe = mod_tools._configured_game_exe()
+    if exe is not None and Path(exe).is_file():
+        return str(exe)
+
+    root = mod_tools._get_game_root(require_paks=True)
+    if root is None:
+        root = mod_tools._get_game_root(require_paks=False)
+    if root is not None:
+        candidate_exe = root / mod_tools._GAME_EXE_REL
+        if candidate_exe.is_file():
+            return str(candidate_exe)
+        paks = root / "Content" / "Paks"
+        if paks.is_dir():
+            pak_files = sorted(paks.glob("*.pak"))
+            if pak_files:
+                return str(pak_files[0])
+            return str(paks)
+    return ""
+
+
+def _windows_open_file_dialog(title: str, default_path: str) -> str:
+    """
+    Native Windows GetOpenFileNameW picker. Always returns an absolute path,
+    including files on another drive. Empty string means cancelled / failed.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class OPENFILENAMEW(ctypes.Structure):
+        _fields_ = [
+            ("lStructSize",       wintypes.DWORD),
+            ("hwndOwner",         wintypes.HWND),
+            ("hInstance",         wintypes.HINSTANCE),
+            ("lpstrFilter",       wintypes.LPCWSTR),
+            ("lpstrCustomFilter", wintypes.LPWSTR),
+            ("nMaxCustFilter",    wintypes.DWORD),
+            ("nFilterIndex",      wintypes.DWORD),
+            ("lpstrFile",         wintypes.LPWSTR),
+            ("nMaxFile",          wintypes.DWORD),
+            ("lpstrFileTitle",    wintypes.LPWSTR),
+            ("nMaxFileTitle",     wintypes.DWORD),
+            ("lpstrInitialDir",   wintypes.LPCWSTR),
+            ("lpstrTitle",        wintypes.LPCWSTR),
+            ("Flags",             wintypes.DWORD),
+            ("nFileOffset",       wintypes.WORD),
+            ("nFileExtension",    wintypes.WORD),
+            ("lpstrDefExt",       wintypes.LPCWSTR),
+            ("lCustData",         wintypes.LPARAM),
+            ("lpfnHook",          ctypes.c_void_p),
+            ("lpTemplateName",    wintypes.LPCWSTR),
+            ("pvReserved",        ctypes.c_void_p),
+            ("dwReserved",        wintypes.DWORD),
+            ("FlagsEx",           wintypes.DWORD),
+        ]
+
+    OFN_FILEMUSTEXIST = 0x00001000
+    OFN_PATHMUSTEXIST = 0x00000800
+    OFN_HIDEREADONLY  = 0x00000004
+    OFN_NOCHANGEDIR   = 0x00000008
+    OFN_EXPLORER      = 0x00080000
+
+    start_dir = ""
+    default_file = ""
+    if default_path:
+        hint = Path(default_path)
+        if hint.is_file():
+            start_dir = str(hint.parent)
+            default_file = hint.name
+        elif hint.is_dir():
+            start_dir = str(hint)
+
+    # Embedded NULs would truncate a normal ctypes string assignment.
+    filter_buf = (ctypes.c_wchar * (len(_FILE_PICKER_FILTER_WIN) + 1))()
+    for i, ch in enumerate(_FILE_PICKER_FILTER_WIN):
+        filter_buf[i] = ch
+
+    buffer = ctypes.create_unicode_buffer(32768)
+    if default_file:
+        buffer.value = default_file
+
+    ofn = OPENFILENAMEW()
+    ofn.lStructSize = ctypes.sizeof(OPENFILENAMEW)
+    ofn.lpstrFilter = ctypes.cast(filter_buf, wintypes.LPCWSTR)
+    ofn.nFilterIndex = 1
+    ofn.lpstrFile = buffer
+    ofn.nMaxFile = 32768
+    ofn.lpstrInitialDir = start_dir or None
+    ofn.lpstrTitle = title
+    ofn.Flags = (
+        OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST
+        | OFN_HIDEREADONLY | OFN_NOCHANGEDIR
+    )
+
+    comdlg32 = ctypes.WinDLL("comdlg32", use_last_error=True)
+    if not comdlg32.GetOpenFileNameW(ctypes.byref(ofn)):
+        return ""
+    return buffer.value.strip()
+
+
+def _pick_game_install_file() -> Path | None:
+    """
+    Ask the user to pick Jujutsu Kaisen CC.exe or any game .pak file.
+
+    Prefers the plugin's native picker (absolute path, any drive). Falls back
+    to the Windows common-dialog API if the plugin has not been rebuilt yet.
+    """
+    title = "Select Jujutsu Kaisen CC.exe or a game .pak file"
+    default_path = _default_browse_path()
+
+    picked = ""
+    native_shown = False
+    lib = getattr(unreal, "JJKModKitLibrary", None)
+    fn = getattr(lib, "open_file_picker", None) if lib is not None else None
+    if fn is not None:
+        try:
+            picked = str(fn(title, default_path, _FILE_PICKER_FILTER_UE) or "").strip()
+            native_shown = True
+        except Exception as exc:
+            unreal.log_warning(f"[ImportGameAssets] Native file picker failed: {exc}")
+            picked = ""
+
+    # Only fall back if the plugin picker is missing — not if the user cancelled.
+    if not picked and not native_shown:
+        try:
+            picked = _windows_open_file_dialog(title, default_path)
+        except Exception as ext:
+            unreal.log_error(f"[ImportGameAssets] Windows file picker failed: {ext}")
+            return None
+
+    if not picked:
+        return None
+    return Path(picked)
+
+
+def _looks_like_paks_dir(folder: Path) -> bool:
+    if not folder.is_dir() or folder.name.lower() != "paks":
+        return False
+    return (
+        any(folder.glob("*.pak"))
+        or any(folder.glob("*.utoc"))
+        or any(folder.glob("*.ucas"))
+    )
+
+
+def _find_paks_from_path(picked: Path) -> Path | None:
+    """
+    Resolve <GameRoot>/Content/Paks from a user-picked exe, pak, or nearby folder.
+    """
+    try:
+        picked = picked.resolve()
+    except Exception:
+        pass
+
+    import importlib
+    import mod_tools
+    importlib.reload(mod_tools)
+
+    if picked.is_file() and picked.suffix.lower() == ".exe":
+        paks = mod_tools._game_root_from_exe(picked) / "Content" / "Paks"
+        if paks.is_dir():
+            return paks
+
+    start = picked.parent if picked.is_file() else picked
+    for folder in [start, *start.parents]:
+        if _looks_like_paks_dir(folder):
+            return folder
+        candidate = folder / "Content" / "Paks"
+        if _looks_like_paks_dir(candidate):
+            return candidate
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _remember_game_path(picked: Path, paks_dir: Path) -> None:
+    """Store Game Exe Path from the picked file so later cooks use this install."""
+    import importlib
+    import mod_tools
+    importlib.reload(mod_tools)
+
+    exe: Path | None = None
+    if picked.is_file() and picked.suffix.lower() == ".exe":
+        exe = picked
+    else:
+        candidate = paks_dir.parent.parent / mod_tools._GAME_EXE_REL
+        if candidate.is_file():
+            exe = candidate
+
+    if exe is None:
+        return
+    try:
+        mod_tools.save_config({"game_exe_path": str(exe)})
+        unreal.log(f"[ImportGameAssets] Saved Game Exe Path: {exe}")
+    except Exception as exc:
+        unreal.log_warning(f"[ImportGameAssets] Could not save Game Exe Path: {exc}")
 
 
 def _get_project_content_dir() -> Path:
@@ -157,7 +366,27 @@ def run() -> None:
     Run the full import pipeline with a progress bar and confirmation dialog.
     Called by the JJK ModKit menu entry.
     """
-    paks_dir         = _get_paks_dir()
+    # ── Locate this machine's game install ───────────────────────────────────
+    picked = _pick_game_install_file()
+    if picked is None:
+        unreal.log("[ImportGameAssets] Cancelled — no game file selected.")
+        return
+
+    paks_dir = _find_paks_from_path(picked)
+    if paks_dir is None or not paks_dir.exists():
+        unreal.EditorDialog.show_message(
+            title="Import Game Assets — Error",
+            message=(
+                "Could not find a Content/Paks folder from:\n"
+                f"{picked}\n\n"
+                "Select Jujutsu Kaisen CC.exe, or any .pak file inside\n"
+                "the game's Content/Paks directory, then try again."
+            ),
+            message_type=unreal.AppMsgType.OK,
+            default_value=unreal.AppReturnType.OK,
+        )
+        return
+
     data_dir         = paks_dir / "Data"
     data_content_dir = data_dir / _DATA_CONTENT_REL
     project_content  = _get_project_content_dir()
@@ -174,9 +403,8 @@ def run() -> None:
             "  3. Delete all problematic assets from the game folder\n"
             "  4. Delete 3 character-capture WBP files from Data/.../Widgets/Commons\n"
             "  5. Copy the extracted content into the project Content/ folder\n\n"
-            # f"Paks dir      : {paks_dir}\n"
-            # f"Data output   : {data_dir}\n"
-            # f"Project Content: {project_content}\n\n"
+            f"Selected file : {picked}\n"
+            f"Paks folder   : {paks_dir}\n\n"
             "The editor will be mostly unresponsive during step 1.\n\n"
             "Do you want to continue?"
         ),
@@ -187,24 +415,7 @@ def run() -> None:
         unreal.log("[ImportGameAssets] Cancelled by user.")
         return
 
-    # ── Validate Paks directory ───────────────────────────────────────────────
-    if not paks_dir.exists():
-        import mod_tools
-        exe = mod_tools._configured_game_exe()
-        exe_display = str(exe) if exe else "(not set)"
-        unreal.EditorDialog.show_message(
-            title="Import Game Assets — Error",
-            message=(
-                f"Paks directory not found:\n{paks_dir}\n\n"
-                f"Resolved from Game Exe Path:\n{exe_display}\n\n"
-                "This must be:\n"
-                "  …/Jujutsu Kaisen CC/Jujutsu Kaisen CC/Binaries/Win64/"
-                "Jujutsu Kaisen CC.exe"
-            ),
-            message_type=unreal.AppMsgType.OK,
-            default_value=unreal.AppReturnType.OK,
-        )
-        return
+    _remember_game_path(picked, paks_dir)
 
     errors: list[str] = []
 
@@ -360,8 +571,15 @@ def run() -> None:
         )
         unreal.log("[ImportGameAssets] ─── Phase 4: delete WBP files ───")
 
-        wbp_dir     = data_dir / _WBP_REL_PATH
-        wbp_deleted = _delete_specific_files(wbp_dir, _WBP_COMMONS_BASENAMES)
+        # 2026-09-30: the three capture WBPs are PRESERVED, not deleted.
+        # The originals were extracted from the game paks and installed in
+        # the project (Content/Widgets/Commons/). They are cold-linker safe
+        # and required at cook time so dependents (e.g. the FreeBattle
+        # select screen) resolve WBP_CharacterCaptureSimple_C and keep
+        # their CharacterVariationImage reference. A future re-import just
+        # overwrites them with identical bytes — do NOT delete them here.
+        unreal.log("[ImportGameAssets] ─── Phase 4: capture WBPs preserved ───")
+        wbp_deleted = 0
         unreal.log(
             f"[ImportGameAssets] ✓ Phase 4 complete — {wbp_deleted} WBP file(s) deleted."
         )
@@ -448,6 +666,81 @@ def run() -> None:
             errors.append(f"Cleanup: could not delete {data_dir}: {exc}")
     else:
         unreal.log(f"[ImportGameAssets]   Data folder already gone: {data_dir}")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Phase 6 — BindWidget mass repair (auto-patch C++ headers for all widgets)
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Imported Widget Blueprints whose C++ parent declares Instanced UWidget*
+    # properties without meta=(BindWidget) would fail to recompile after
+    # uncooking ("Tried to create a property X ..."), and cooking them emits
+    # the corrupt package that dies at load with
+    # "WidgetTree.TopWidget: Serial size mismatch".
+    # This runs the same reflection-based repair as uncook (bIsVariable widgets
+    # only — structural widgets are deliberately left alone) across every
+    # imported Widget Blueprint, so no per-asset manual fix is ever needed.
+    # Patched headers require ONE rebuild (build.ps1) before any cook.
+    unreal.log("[ImportGameAssets] ─── Phase 6: BindWidget header repair ───")
+    bw_patched = bw_clean = bw_unpatchable = 0
+    try:
+        _bw_api = getattr(getattr(unreal, "BlueprintUncookerLibrary", None),
+                          "ensure_bind_widget_headers", None)
+    except Exception:
+        _bw_api = None
+    if _bw_api is None:
+        unreal.log_warning(
+            "[ImportGameAssets] Phase 6 skipped — BlueprintUncooker auto-repair "
+            "not in these binaries. Rebuild (build.ps1) to enable it; until then, "
+            "uncooked Widgets may still hit the BindWidget cook error."
+        )
+        errors.append("Phase 6 skipped — rebuild to enable BindWidget auto-repair.")
+    else:
+        import importlib as _il
+        import fix_widget_bindings as _fwb
+        try:
+            _fwb = _il.reload(_fwb)
+        except Exception:
+            pass
+        try:
+            _wb_ps = _fwb.find_widget_blueprints("/Game/Widgets")
+        except Exception as _find_ex:
+            unreal.log_warning(f"[ImportGameAssets]   widget discovery failed: {_find_ex}")
+            _wb_ps = []
+        unreal.log(f"[ImportGameAssets]   {len(_wb_ps)} Widget Blueprint(s) to check…")
+        import re as _re
+        with unreal.ScopedSlowTask(max(len(_wb_ps), 1), "Repairing BindWidget headers…") as _bw_task:
+            _bw_task.make_dialog(True)
+            for _pkg in _wb_ps:
+                if _bw_task.should_cancel():
+                    unreal.log_warning("[ImportGameAssets]   Phase 6 cancelled by user.")
+                    break
+                _bw_task.enter_progress_frame(1, _pkg.rsplit("/", 1)[-1])
+                try:
+                    _st = _bw_api(_pkg)
+                except Exception as _call_ex:
+                    unreal.log_warning(f"[ImportGameAssets]   {_pkg} — check failed: {_call_ex}")
+                    continue
+                if not isinstance(_st, str) or _st.startswith("ERROR"):
+                    continue
+                _m_p = _re.search(r"HeadersPatched:(\d+)", _st)
+                _m_u = _re.search(r"Unpatchable:(\d+)", _st)
+                _n_p = int(_m_p.group(1)) if _m_p else 0
+                _n_u = int(_m_u.group(1)) if _m_u else 0
+                if _n_p > 0:
+                    bw_patched += 1
+                else:
+                    bw_clean += 1
+                if _n_u > 0:
+                    bw_unpatchable += 1
+        unreal.log(
+            f"[ImportGameAssets] ✓ Phase 6 complete — "
+            f"patched: {bw_patched}, clean: {bw_clean}, "
+            f"with unpatchable props: {bw_unpatchable}"
+        )
+        if bw_patched > 0:
+            errors.append(
+                f"Phase 6 auto-patched C++ headers for {bw_patched} Widget Blueprint(s) — "
+                "REBUILD (close editor → .\\build.ps1) before cooking any Widget override."
+            )
 
     # ── Summary ───────────────────────────────────────────────────────────────
     if errors:

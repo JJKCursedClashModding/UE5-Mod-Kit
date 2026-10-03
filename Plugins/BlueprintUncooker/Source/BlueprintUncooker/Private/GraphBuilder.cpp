@@ -5,6 +5,7 @@
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/TimelineTemplate.h"
+#include "Engine/Engine.h"                 // UEngine::CopyPropertiesForUnrelatedObjects
 #include "Components/ActorComponent.h"
 
 #include "EdGraph/EdGraph.h"
@@ -53,10 +54,12 @@
 // Widget Blueprint support
 #include "Blueprint/WidgetBlueprintGeneratedClass.h" // UWidgetBlueprintGeneratedClass, FDelegateRuntimeBinding, EBindingKind
 #include "Blueprint/WidgetTree.h"                    // UWidgetTree
-#include "WidgetBlueprint.h"                         // UWidgetBlueprint, FDelegateEditorBinding
+#include "Binding/DynamicPropertyPath.h"             // FDynamicPropertyPath (runtime binding source path)
+#include "WidgetBlueprint.h"                         // UWidgetBlueprint, FDelegateEditorBinding, FEditorPropertyPath
 #include "Animation/WidgetAnimation.h"               // UWidgetAnimation — explicit dep (also transitively via WBPGC header)
 #include "Blueprint/UserWidget.h"                    // UUserWidget
 #include "Components/Widget.h"                       // UWidget
+#include "BindWidgetHeaderPatcher.h"
 
 DEFINE_LOG_CATEGORY(LogGraphBuilder);
 
@@ -74,6 +77,11 @@ template<typename NodeType>
 static NodeType* SpawnNode(UEdGraph* Graph, int32 X, int32 Y)
 {
 	NodeType* Node = NewObject<NodeType>(Graph);
+	// Match the editor's node spawners (e.g. FEdGraphSchemaAction_K2NewNode::SpawnNode,
+	// UBlueprintNodeSpawner::SpawnNode): without this flag FBlueprintEditorUtils::
+	// UpdateTransactionalFlags() repairs the node on first open and marks the Blueprint
+	// dirty, which pops the "Blueprint requires updating. Please resave." notification.
+	Node->SetFlags(RF_Transactional);
 	Graph->AddNode(Node, false, false);
 	Node->CreateNewGuid();
 	Node->PostPlacedNewNode();
@@ -81,6 +89,88 @@ static NodeType* SpawnNode(UEdGraph* Graph, int32 X, int32 Y)
 	Node->NodePosX = X;
 	Node->NodePosY = Y;
 	return Node;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: find an event node that is already present in the graph.
+// FKismetEditorUtilities::CreateBlueprint auto-places the Blueprint class's
+// default event nodes (e.g. Pre Construct/Construct/Tick on widgets) as disabled
+// ghost nodes, so a decompiled event stub for one of those must reuse the
+// existing node instead of spawning a duplicate next to it.
+// ---------------------------------------------------------------------------
+static UK2Node_Event* FindExistingEventNode(UEdGraph* Graph, const FName& EventName)
+{
+	if (!Graph) return nullptr;
+
+	for (UEdGraphNode* Node : Graph->Nodes)
+	{
+		// Custom events store their name in CustomFunctionName, not EventReference.
+		if (UK2Node_CustomEvent* CustomEventNode = Cast<UK2Node_CustomEvent>(Node))
+		{
+			if (CustomEventNode->CustomFunctionName == EventName)
+			{
+				return CustomEventNode;
+			}
+		}
+		else if (UK2Node_Event* EventNode = Cast<UK2Node_Event>(Node))
+		{
+			if (EventNode->EventReference.GetMemberName() == EventName)
+			{
+				return EventNode;
+			}
+		}
+	}
+
+	return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: drop the ghost helper nodes the editor auto-wired to InNode (an
+// auto-generated parent call, for example). InNode itself is kept; only its
+// ghost neighbours are removed, so the decompiled body is the only thing that
+// runs.
+// ---------------------------------------------------------------------------
+static void RemoveAttachedGhostNodes(UEdGraphNode* InNode, UEdGraph* Graph)
+{
+	if (!InNode || !Graph) return;
+
+	for (UEdGraphPin* Pin : InNode->Pins)
+	{
+		if (!Pin) continue;
+
+		TArray<UEdGraphPin*> LinkedPins = Pin->LinkedTo;
+		for (UEdGraphPin* LinkedPin : LinkedPins)
+		{
+			UEdGraphNode* LinkedNode = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
+			if (!LinkedNode || !LinkedNode->IsAutomaticallyPlacedGhostNode())
+			{
+				continue;
+			}
+
+			Pin->BreakLinkTo(LinkedPin);
+			RemoveAttachedGhostNodes(LinkedNode, Graph);
+			LinkedNode->BreakAllNodeLinks();
+			Graph->RemoveNode(LinkedNode);
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Helper: turn a reused auto-placed ghost node into a regular node.
+// Equivalent to UEdGraphPin::ConvertConnectedGhostNodesToRealNodes() (which is
+// private), minus the recursion: enable the node and clear the
+// "disabled and will not be called" comment.
+// ---------------------------------------------------------------------------
+static void MakeReusedEventNodeReal(UEdGraphNode* InNode)
+{
+	if (!InNode || !InNode->IsAutomaticallyPlacedGhostNode()) return;
+
+	InNode->Modify();
+	InNode->SetEnabledState(ENodeEnabledState::Enabled, /*bUserAction=*/false);
+	InNode->NodeComment.Empty();
+#if WITH_EDITORONLY_DATA
+	InNode->bCommentBubbleVisible = false;
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -805,6 +895,7 @@ void FGraphBuilder::SetupTimelines(UBlueprint* BP)
 		if (EventGraph)
 		{
 			UK2Node_Timeline* TimelineNode = NewObject<UK2Node_Timeline>(EventGraph);
+			TimelineNode->SetFlags(RF_Transactional);
 			EventGraph->AddNode(TimelineNode, false, false);
 			TimelineNode->CreateNewGuid();
 			TimelineNode->TimelineName        = OrigTT->GetFName();
@@ -849,6 +940,80 @@ void FGraphBuilder::SetupInheritableComponents(UBlueprint* BP)
 // ---------------------------------------------------------------------------
 // SetupWidgetTree
 // ---------------------------------------------------------------------------
+
+namespace
+{
+	/**
+	 * Best-effort rebuild of the editor property path (FEditorPropertyPath) from the cooked
+	 * runtime property path (FDynamicPropertyPath).
+	 *
+	 * FDelegateEditorBinding::ToRuntimeBinding copies SourcePath.ToPropertyPath() into the runtime
+	 * binding, so dropping SourcePath on uncook silently disables every property binding. The
+	 * runtime path only stores member names/array indices, so resolve them against the cooked
+	 * generated class (which has the same member layout as the rebuilt blueprint).
+	 * Returns an empty path if any segment cannot be resolved — the binding is then kept as-is
+	 * rather than half-rebuilt.
+	 */
+	FEditorPropertyPath ConvertRuntimeSourcePathToEditor(const FDynamicPropertyPath& RuntimePath, UClass* RootClass)
+	{
+		FEditorPropertyPath Result;
+		if (!RootClass || !RuntimePath.IsValid())
+		{
+			return Result;
+		}
+
+		UStruct* Scope = RootClass;
+		for (int32 Index = 0; Index < RuntimePath.GetNumSegments(); ++Index)
+		{
+			const FPropertyPathSegment& Segment = RuntimePath.GetSegment(Index);
+			const FName SegmentName = Segment.GetName();
+			if (SegmentName.IsNone() || Segment.GetArrayIndex() != INDEX_NONE)
+			{
+				Result.Segments.Reset();
+				return Result;
+			}
+
+			FProperty* Property = Scope ? FindFProperty<FProperty>(Scope, SegmentName) : nullptr;
+			if (!Property)
+			{
+				Result.Segments.Reset();
+				return Result;
+			}
+
+			Result.Segments.Add(FEditorPropertyPathSegment(Property));
+
+			if (FStructProperty* StructProp = CastField<FStructProperty>(Property))
+			{
+				Scope = StructProp->Struct;
+			}
+			else if (FObjectPropertyBase* ObjectProp = CastField<FObjectPropertyBase>(Property))
+			{
+				Scope = ObjectProp->PropertyClass;
+			}
+			else if (FArrayProperty* ArrayProp = CastField<FArrayProperty>(Property))
+			{
+				if (FStructProperty* InnerStruct = CastField<FStructProperty>(ArrayProp->Inner))
+				{
+					Scope = InnerStruct->Struct;
+				}
+				else if (FObjectPropertyBase* InnerObject = CastField<FObjectPropertyBase>(ArrayProp->Inner))
+				{
+					Scope = InnerObject->PropertyClass;
+				}
+				else
+				{
+					Scope = nullptr;
+				}
+			}
+			else
+			{
+				Scope = nullptr;
+			}
+		}
+
+		return Result;
+	}
+}
 
 void FGraphBuilder::SetupWidgetTree(UBlueprint* BP)
 {
@@ -922,17 +1087,26 @@ void FGraphBuilder::SetupWidgetTree(UBlueprint* BP)
 			EB.PropertyName = RB.PropertyName;
 			EB.FunctionName = RB.FunctionName;
 			EB.Kind         = RB.Kind;          // function vs property kind   (FIX: was missing)
-			// NOTE: FDelegateEditorBinding::SourcePath is FEditorPropertyPath (UMGEditor type)
-			// while FDelegateRuntimeBinding::SourcePath is FDynamicPropertyPath (CoreUObject).
-			// These are incompatible types in UE5.1 — no cross-assignment operator exists.
-			// The WBP compiler reconstructs the binding from Kind + FunctionName/SourceProperty,
-			// so omitting the editor SourcePath path string does not break functional binding.
+
+			// Rebuild the editor property path from the cooked runtime path.
+			// FDelegateEditorBinding::ToRuntimeBinding uses SourcePath.ToPropertyPath(), so a
+			// dropped SourcePath silently disables property-kind bindings after a recompile.
+			// Resolve against the cooked generated class (WBPGC) because the rebuilt blueprint's
+			// skeleton class does not exist yet at this stage.
+			if (RB.Kind == EBindingKind::Property && RB.SourcePath.IsValid())
+			{
+				EB.SourcePath = ConvertRuntimeSourcePathToEditor(RB.SourcePath, WBPGC);
+				if (EB.SourcePath.IsEmpty())
+				{
+					UE_LOG(LogTemp, Warning,
+						TEXT("[BPUncooker] Could not rebuild SourcePath for property binding '%s.%s' — the binding is kept but will have no runtime source path"),
+						*EB.ObjectName, *EB.PropertyName.ToString());
+				}
+			}
 
 			// SourceProperty: editor-display hint only.
 			// For Function bindings it equals FunctionName.
-			// For Property bindings the WBP compiler uses SourcePath directly,
-			// so SourceProperty is left as NAME_None (FIX: was wrongly set to
-			// RB.FunctionName which is empty for property bindings).
+			// For Property bindings the runtime binding uses SourcePath (rebuilt above).
 			if (RB.Kind == EBindingKind::Function)
 			{
 				EB.SourceProperty = RB.FunctionName;
@@ -952,58 +1126,30 @@ void FGraphBuilder::SetupWidgetTree(UBlueprint* BP)
 	// inherited C++ property and raising:
 	//   "Tried to create a property X … but another object already exists"
 	// The conflict is suppressed by setting the BindWidget metadata on the
-	// C++ property at this point, which tells the WBP compiler "this property
+	// C++ property, which tells the WBP compiler "this property
 	// is the authoritative binding for that named widget — do not create a
-	// duplicate".  This is the generic equivalent of writing
-	// meta=(BindWidget) in the original C++ source header, and means no
-	// per-class header edits are ever required.
+	// duplicate".
+	//
+	// NOTE: a transient in-memory stamp alone does NOT survive the cook — the
+	// cook runs in a fresh UnrealEditor-Cmd.exe process with freshly loaded
+	// binaries. FBindWidgetHeaderPatcher therefore ALSO patches the project's
+	// Source headers on disk (durable fix). If it reports HeadersPatched > 0 you
+	// MUST rebuild (build.ps1 / Ctrl+Alt+F11) before recooking, otherwise the
+	// next cook reuses the old binaries and emits the same corrupt package
+	// that dies at load with "WidgetTree.TopWidget: Serial size mismatch".
 	if (WBP->WidgetTree)
 	{
-		// ── 4a. Collect every widget name present in the duplicated tree ─
-		TSet<FName> TreeWidgetNames;
-		WBP->WidgetTree->ForEachWidget([&TreeWidgetNames](UWidget* W)
-		{
-			if (W) TreeWidgetNames.Add(W->GetFName());
-		});
+		// ── 4a/4b. Transient stamp + durable header patch (centralized) ─
+		// Name collection + bIsVariable filtering live in the patcher, so
+		// structural widgets never gain spurious BindWidget metadata.
+		const FBindWidgetPatchResult BindFix =
+			FBindWidgetHeaderPatcher::EnsureBindWidgetFromTree(WBP->ParentClass, WBP->WidgetTree);
 
-		// ── 4b. Walk every C++ ancestor of the new WBP's parent class ───
-		// Stop at UUserWidget/UWidget — engine classes never hold game-
-		// specific BindWidget properties.
-		int32 StampCount = 0;
-		for (UClass* C = WBP->ParentClass; C; C = C->GetSuperClass())
-		{
-			if (C == UUserWidget::StaticClass() ||
-				C == UWidget::StaticClass()     ||
-				C == UObject::StaticClass())
-			{
-				break;
-			}
-
-			for (TFieldIterator<FObjectProperty> PropIt(C, EFieldIteratorFlags::ExcludeSuper);
-				PropIt; ++PropIt)
-			{
-				FObjectProperty* Prop = *PropIt;
-				if (!Prop || !Prop->PropertyClass) continue;
-				if (!Prop->PropertyClass->IsChildOf(UWidget::StaticClass())) continue;
-				if (!TreeWidgetNames.Contains(Prop->GetFName())) continue;
-
-				// Already stamped (e.g. from a prior uncook run or from the
-				// header itself)?  Nothing to do.
-				if (Prop->HasMetaData(TEXT("BindWidget"))) continue;
-
-				Prop->SetMetaData(TEXT("BindWidget"), TEXT(""));
-				++StampCount;
-				UE_LOG(LogTemp, Log,
-					TEXT("[BPUncooker] Auto-stamped BindWidget on '%s::%s' for '%s'"),
-					*C->GetName(), *Prop->GetName(), *WBP->GetName());
-			}
-		}
-
-		if (StampCount > 0)
+		if (BindFix.StampedTransient > 0 && BindFix.HeadersPatched == 0 && BindFix.AlreadyOnDisk == 0)
 		{
 			UE_LOG(LogTemp, Log,
-				TEXT("[BPUncooker] Auto-stamped BindWidget on %d C++ parent propert(ies) for '%s'"),
-				StampCount, *WBP->GetName());
+				TEXT("[BPUncooker] BindWidget: %d transient stamp(s) applied for '%s' (headers already carry BindWidget — no rebuild needed)"),
+				BindFix.StampedTransient, *WBP->GetName());
 		}
 	}
 
@@ -1019,13 +1165,37 @@ void FGraphBuilder::SetupWidgetTree(UBlueprint* BP)
 		for (UWidgetAnimation* OrigAnim : WBPGC->Animations)
 		{
 			if (!OrigAnim) continue;
-			UWidgetAnimation* NewAnim = DuplicateObject<UWidgetAnimation>(OrigAnim, WBP);
+
+			// The cooked WBPGC stores the compiler's runtime animation clones, named
+			// "<Name>_INST" (see FWidgetBlueprintCompilerContext::FinishCompilingClass).
+			// Restore the editor-side name when copying them into the UWidgetBlueprint:
+			// without this the next compile clones them again to "<Name>_INST_INST", which
+			// no longer matches the name the game's runtime expects for the animation.
+			FString LogicalName = OrigAnim->GetName();
+			if (LogicalName.EndsWith(TEXT("_INST"), ESearchCase::CaseSensitive))
+			{
+				LogicalName.LeftChopInline(5);
+			}
+
+			FName DestName = OrigAnim->GetFName();
+			if (LogicalName != OrigAnim->GetName())
+			{
+				DestName = FName(*LogicalName);
+				// Only de-duplicate on a real collision: MakeUniqueObjectName always appends a
+				// per-(outer,class) counter, which would rename every animation to "<Name>_N".
+				if (FindObject<UObject>(WBP, *DestName.ToString()))
+				{
+					DestName = MakeUniqueObjectName(WBP, UWidgetAnimation::StaticClass(), DestName);
+				}
+			}
+
+			UWidgetAnimation* NewAnim = DuplicateObject<UWidgetAnimation>(OrigAnim, WBP, DestName);
 			if (NewAnim)
 			{
 				WBP->Animations.Add(NewAnim);
 				UE_LOG(LogTemp, Log,
-					TEXT("[BPUncooker] Duplicated animation '%s' (bindings=%d) for '%s'"),
-					*OrigAnim->GetName(),
+					TEXT("[BPUncooker] Duplicated animation '%s' as '%s' (bindings=%d) for '%s'"),
+					*OrigAnim->GetName(), *NewAnim->GetName(),
 					OrigAnim->AnimationBindings.Num(),
 					*WBP->GetName());
 			}
@@ -1151,7 +1321,25 @@ void FGraphBuilder::BuildEventGraph(
 		bool bIsOverridableEvent = (DeclClass != nullptr)
 			&& DeclClass->FindFunctionByName(*FuncName, EIncludeSuperFlag::ExcludeSuper) != nullptr;
 
-		if (bBuildingChildClass)
+		// CreateBlueprint already placed the class's default event nodes
+		// (Pre Construct/Construct/Tick on widgets). Reuse the existing node for
+		// this event and wire the decompiled body into it instead of spawning a
+		// duplicate next to it.
+		if (UK2Node_Event* ExistingEventNode = FindExistingEventNode(EventGraph, FName(*FuncName)))
+		{
+			// Drop the ghost helpers auto-wired to it (an auto-generated parent
+			// call, for example) and enable it so the decompiled body actually runs.
+			RemoveAttachedGhostNodes(ExistingEventNode, EventGraph);
+			MakeReusedEventNodeReal(ExistingEventNode);
+			ExistingEventNode->SetFlags(RF_Transactional);
+
+			EntryNode = ExistingEventNode;
+
+			UE_LOG(LogGraphBuilder, Log,
+				TEXT("[BPUncooker] BuildEventGraph: reusing existing event node '%s' for '%s'"),
+				*ExistingEventNode->GetName(), *FuncName);
+		}
+		else if (bBuildingChildClass)
 		{
 			// Always use CustomEvent for child class
 			UK2Node_CustomEvent* CustomEventNode =

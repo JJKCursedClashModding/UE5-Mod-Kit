@@ -32,7 +32,18 @@ public:
 	 *                         "/Game/Characters/Uncooked/GameCharacter_BP"
 	 *                         If empty, defaults to
 	 *                         <SourcePackagePath>/Uncooked/<AssetName>
+	 *                         In-place uncook (OutputPath == SourceAssetPath) is
+	 *                         rejected: it would collide with the loaded cooked
+	 *                         class in the same package and fatal.
 	 * @return                 Human-readable status string describing the result.
+	 *
+	 * Notes:
+	 *   - A cooked evaluation-template baseline is captured automatically before
+	 *     the uncook (Saved/AssetBaselines/<package>.txt) so the core-cook staging
+	 *     guard can detect lost custom sequencer evaluation data.
+	 *   - Widget animations are copied back under their editor names (the cooked
+	 *     "<Name>_INST" suffix is stripped so the next compile does not produce
+	 *     "<Name>_INST_INST").
 	 */
 	UFUNCTION(BlueprintCallable, Category = "BlueprintUncooker",
 		meta = (CallInEditor = "true"))
@@ -113,4 +124,34 @@ public:
 		const FString& OutputBase      = TEXT("/Game/Uncooked"),
 		const FString& MountPointName  = TEXT(""),
 		bool bDryRun                   = false);
+
+	/**
+	 * Persistent BindWidget repair for one Widget Blueprint.
+	 *
+	 * Applies the transient in-memory stamp (immediate compile) AND patches the
+	 * project's Source/**.h on disk to add meta=(BindWidget) wherever a C++
+	 * parent UWidget* property matches a widget in the tree but lacks the meta.
+	 * Call this for already-uncooked WBPs, or rely on the automatic call inside
+	 * Uncook (SetupWidgetTree) for new uncooks.
+	 *
+	 * If headers were patched you MUST rebuild (build.ps1 / Ctrl+Alt+F11)
+	 * before recooking — the cook uses freshly loaded binaries.
+	 *
+	 * @param SourceAssetPath  Cooked OR uncooked Widget Blueprint path,
+	 *                         e.g. "/Game/Widgets/VisualLobby/WBP_VisualLobbyCharacterSelect"
+	 * @return                 Status string; starts with "ERROR:" on failure.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "BlueprintUncooker",
+		meta = (CallInEditor = "true"))
+	static FString EnsureBindWidgetHeaders(const FString& SourceAssetPath);
+
+	/**
+	 * Dry-run check: which C++ parent properties would need a header patch.
+	 * No files are written. Use as a pre-cook gate — if this returns anything
+	 * other than "OK", cooking now will produce the corrupt package that dies
+	 * with "WidgetTree.TopWidget: Serial size mismatch" at load.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "BlueprintUncooker",
+		meta = (CallInEditor = "true"))
+	static FString ValidateWidgetBindings(const FString& SourceAssetPath);
 };

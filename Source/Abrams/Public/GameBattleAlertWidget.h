@@ -11,7 +11,7 @@ class ABRAMS_API UGameBattleAlertWidget : public UGameWidgetBase, public IGameBa
     GENERATED_BODY()
 public:
 protected:
-    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true))
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true, BindWidget))
     UGameBattleLockonAlertWidget* LockonAlert;
     
 public:

@@ -10,7 +10,7 @@ class ABRAMS_API UGameVisualLobbyCharacterSelectTopWidget : public UGameWindowBa
     GENERATED_BODY()
 public:
 protected:
-    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true))
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true, BindWidget))
     UGameWidgetTextBlock* CharacterNameText;
     
 public:

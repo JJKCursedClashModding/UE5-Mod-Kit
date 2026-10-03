@@ -10,8 +10,22 @@ common widgets used by the game:
     /Game/Widgets/Commons/WBP_CharacterCapturePlayer
     /Game/Widgets/Commons/WBP_CharacterCaptureSimple
 
-If any of the assets already exist on disk the existing .uasset file is
-removed first so create_asset can write a fresh stub in its place.
+Approach (v4 — direct uncook per target, no duplication step):
+  Cooked imports ship _C classes only, so there is nothing loadable to
+  duplicate from — and duplicate_asset output proved cold-parse hostile
+  (fresh cooker/headless scans die on it while the uncooked source parses
+  clean). Instead each target is produced by uncooking the surviving sibling
+  WBP_CharacterCapture STRAIGHT into the target path. Every stub is then an
+  independent, first-generation uncook product (proven cold-safe class),
+  with a correctly-named skeleton, compiled and saved by the uncooker
+  itself. No shared-subobject or duplication-provenance risk by construction.
+The stubs exist only so dependent cooks resolve the import; they are never
+staged (not in CorePackages), so the game keeps using the stock originals
+at runtime.
+
+NOTE: uncooking may auto-patch capture-widget C++ headers (variable matches).
+If it reports patched headers, REBUILD (close editor → .\\build.ps1) before
+the next cook. Save all work before running — uncooking runs the compiler.
 
 Usage — JJK ModKit menu → Asset Tools → Stub Character-Capture WBPs
      or UE Python console:
@@ -19,13 +33,15 @@ Usage — JJK ModKit menu → Asset Tools → Stub Character-Capture WBPs
          importlib.reload(stub_wbp_commons)
          stub_wbp_commons.run()
 """
+from __future__ import annotations
 
-import os
 import unreal
 
 
 # ─── Targets ───────────────────────────────────────────────────────────────────
 
+# Cooked _C-only source asset (reconstructed from bytecode, not duplicated).
+_TEMPLATE_SOURCE = "/Game/Widgets/Commons/WBP_CharacterCapture"
 _WBP_TARGETS: list[tuple[str, str]] = [
     ("/Game/Widgets/Commons", "WBP_CharacterCaptureEnemy"),
     ("/Game/Widgets/Commons", "WBP_CharacterCapturePlayer"),
@@ -33,32 +49,25 @@ _WBP_TARGETS: list[tuple[str, str]] = [
 ]
 
 
-# ─── Helpers ───────────────────────────────────────────────────────────────────
-
-def _get_content_dir() -> str:
-    """Return the absolute path to the project Content directory, no trailing slash."""
-    raw = unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_content_dir())
-    return raw.replace('\\', '/').rstrip('/')
-
-
 # ─── Main ──────────────────────────────────────────────────────────────────────
 
 def run() -> None:
     """
-    Create Widget Blueprint stubs for the three character-capture WBPs:
-
-        WBP_CharacterCaptureEnemy
-        WBP_CharacterCapturePlayer
-        WBP_CharacterCaptureSimple
-
-    All stubs are placed under  /Game/Widgets/Commons/  with
-    UserWidget as the parent class.  Any existing on-disk .uasset at each
-    target path is removed first so create_asset always writes a clean file.
+    Uncook the surviving sibling directly into each of the three target
+    paths (overwriting whatever is there — the uncooker evicts stale
+    in-memory packages and saves a fresh compiled pair each time).
     """
-    content_dir = _get_content_dir()
-    asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
+    try:
+        _uncook = unreal.BlueprintUncookerLibrary.uncook_blueprint_asset
+    except AttributeError:
+        unreal.log_error(
+            "[StubWBPCommons] BlueprintUncooker API missing — "
+            "rebuild (build.ps1) with the updated plugin first."
+        )
+        return
 
     ok = fail = 0
+    patched_headers = False
 
     with unreal.ScopedSlowTask(len(_WBP_TARGETS), 'Creating character-capture WBP stubs…') as slow:
         slow.make_dialog(True)
@@ -70,45 +79,42 @@ def run() -> None:
 
             slow.enter_progress_frame(1, asset_name)
             engine_path = f'{package_path}/{asset_name}'
-            unreal.log(f'[StubWBPCommons] Processing {engine_path}')
-
-            # ── Remove existing .uasset on disk (if any) ───────────────────────
-            rel_package = package_path[len('/Game'):].lstrip('/')
-            disk_out    = f'{content_dir}/{rel_package}/{asset_name}.uasset'
-
-            if os.path.exists(disk_out):
-                try:
-                    os.remove(disk_out)
-                    unreal.log(f'[StubWBPCommons]   Removed stale file: {disk_out}')
-                except OSError as exc:
+            # 2026-09-30: the game-original capture WBPs are installed in
+            # the project and cook-safe — NEVER overwrite them with stubs.
+            # (Uncook/duplicate products proved cold-parse hostile: cooker
+            # dies with Array assertion 763 while June-shaped files parse.)
+            try:
+                if unreal.EditorAssetLibrary.does_asset_exist(engine_path):
                     unreal.log_warning(
-                        f'[StubWBPCommons]   Cannot remove "{disk_out}": {exc}'
+                        f'[StubWBPCommons] SKIP {engine_path} — asset already '
+                        f'exists (game original installed). Refusing to overwrite.'
                     )
-                    fail += 1
                     continue
+            except Exception:
+                pass
+            unreal.log(f'[StubWBPCommons] Uncooking {_TEMPLATE_SOURCE} → {engine_path} …')
 
-            # ── Create the stub Widget Blueprint ───────────────────────────────
-            factory = unreal.WidgetBlueprintFactory()
-            factory.set_editor_property('parent_class', unreal.UserWidget)
-
-            stub = asset_tools.create_asset(
-                asset_name   = asset_name,
-                package_path = package_path,
-                asset_class  = unreal.WidgetBlueprint,
-                factory      = factory,
-            )
-
-            if stub is None:
-                unreal.log_error(
-                    f'[StubWBPCommons]   create_asset returned None for {engine_path}'
-                )
+            try:
+                status = _uncook(_TEMPLATE_SOURCE, engine_path)
+            except Exception as exc:
+                unreal.log_error(f'[StubWBPCommons]   uncook raised for {engine_path}: {exc}')
                 fail += 1
                 continue
 
-            unreal.EditorAssetLibrary.save_asset(engine_path, only_if_is_dirty=False)
-            unreal.log(f'[StubWBPCommons]   ✓ {engine_path}')
+            unreal.log(f'[StubWBPCommons]   result: {status}')
+            if isinstance(status, str) and status.startswith("ERROR"):
+                fail += 1
+                continue
+            if (isinstance(status, str) and "HeadersPatched:" in status
+                    and "HeadersPatched:0" not in status):
+                patched_headers = True
             ok += 1
 
+    if patched_headers:
+        unreal.log_warning(
+            "[StubWBPCommons] C++ headers were auto-patched during uncook — "
+            "REBUILD (close editor → .\\build.ps1) before cooking with these stubs."
+        )
     unreal.log(
         f'[StubWBPCommons] ━━━ Complete ━━━  '
         f'created: {ok}, failed: {fail}'

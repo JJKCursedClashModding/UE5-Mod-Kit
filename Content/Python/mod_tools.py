@@ -2322,13 +2322,19 @@ def _stage_core_packages(mod_name: str, package_paths: list) -> int:
         <game_mods_path>/<mod_name>/assets/Jujutsu Kaisen CC/Content/Characters/CP_010/AM_Foo.uasset
 
     Returns the number of files copied, or -1 on unrecoverable error.
+
+    Runs Content/Python/cooked_asset_guard.py before copying: packages that lost custom
+    sequencer evaluation templates are refused (nothing is staged for this mod).
     """
     cooked_content = _core_cook_output_content_by_mod.get(mod_name, _get_cooked_dir() / "Content")
     game_mods_path = _get_game_mods_path()
     dest_assets    = game_mods_path / mod_name / "assets" / "Jujutsu Kaisen CC" / "Content"
 
-    copied = 0
-    had_missing = False
+    # ── Pass 1: resolve + verify every package before copying anything ─────────
+    # The guard refuses packages that lost custom sequencer evaluation templates
+    # (see Saved/uncooker_investigation_report.md). Verifying first keeps the mod
+    # folder free of a half-staged, broken override.
+    staged_entries = []  # (pkg_path, rel_path, cooked_dir, base_name, matched)
     for pkg_path in package_paths:
         # /Game/Characters/CP_010/AM_Foo → Characters/CP_010/AM_Foo
         if not pkg_path.startswith("/Game/"):
@@ -2341,8 +2347,7 @@ def _stage_core_packages(mod_name: str, package_paths: list) -> int:
 
         if not cooked_dir.exists():
             _log_error(f"[JJK Core Cook] Cooked directory not found: {cooked_dir}")
-            had_missing = True
-            continue
+            return -1
 
         # Collect all files produced for this package (.uasset, .uexp, .ubulk, …)
         matched = list(cooked_dir.glob(f"{base_name}.*"))
@@ -2351,9 +2356,27 @@ def _stage_core_packages(mod_name: str, package_paths: list) -> int:
                 f"[JJK Core Cook] No cooked files found for  {pkg_path}  "
                 f"in  {cooked_dir}"
             )
-            had_missing = True
-            continue
+            return -1
 
+        try:
+            import cooked_asset_guard
+            guard_error = cooked_asset_guard.verify_package(
+                pkg_path, cooked_dir, _get_project_root())
+        except ImportError:
+            guard_error = ""
+        except Exception as exc:  # noqa: BLE001 - never let the guard crash the cook
+            _log_error(f"[JJK Core Cook] cooked_asset_guard error for {pkg_path}: {exc}")
+            return -1
+
+        if guard_error:
+            _log_error(f"[JJK Core Cook] REFUSING to stage {pkg_path}: {guard_error}")
+            return -1
+
+        staged_entries.append((pkg_path, rel_path, cooked_dir, base_name, matched))
+
+    # ── Pass 2: copy the verified packages ─────────────────────────────────────
+    copied = 0
+    for pkg_path, rel_path, cooked_dir, base_name, matched in staged_entries:
         for src in matched:
             dst = dest_assets / rel_path.parent / src.name
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -2362,6 +2385,72 @@ def _stage_core_packages(mod_name: str, package_paths: list) -> int:
             copied += 1
 
     return copied
+
+
+def _ensure_widget_bindings_for_packages(package_paths: list) -> tuple:
+    """
+    Automatic BindWidget gate for core-package cooks (runs on the game thread).
+
+    For every Widget Blueprint in *package_paths* this calls
+    BlueprintUncookerLibrary.ensure_bind_widget_headers, which applies the
+    transient in-memory stamp AND auto-patches Source/**/*.h on disk.
+
+    Returns (proceed, detail):
+      (True,  "")     → clean (or nothing widget-related to do) — cook may run.
+      (False, detail) → headers were auto-patched, or patched headers are on
+                          disk with stale binaries: REBUILD FIRST. The caller
+                          must skip the cook — running it now would use stale
+                          binaries and emit the corrupt package that dies with
+                          "WidgetTree.TopWidget: Serial size mismatch" at load.
+    """
+    try:
+        import unreal
+    except ImportError:
+        return True, ""
+
+    try:
+        ensure = unreal.BlueprintUncookerLibrary.ensure_bind_widget_headers
+    except AttributeError:
+        _log(
+            "[JJK Core Cook] BindWidget gate: BlueprintUncooker auto-repair not in "
+            "these binaries — skipping gate. If a Widget cook fails with "
+            "'Tried to create a property', rebuild (build.ps1) to get the fix."
+        )
+        return True, ""
+
+    import re
+    blocked: list = []
+    for pkg in package_paths or []:
+        try:
+            status = ensure(pkg)
+        except Exception as ex:
+            _log(f"[JJK Core Cook] BindWidget gate: {pkg} — check skipped ({ex})")
+            continue
+        if not isinstance(status, str) or status.startswith("ERROR"):
+            continue  # not a Widget Blueprint (DataTable, texture, …) — nothing to gate
+        m_patched = re.search(r"HeadersPatched:(\d+)", status)
+        m_stale   = re.search(r"AlreadyOnDisk:(\d+)", status)
+        m_unp     = re.search(r"Unpatchable:(\d+)", status)
+        n_patched = int(m_patched.group(1)) if m_patched else 0
+        n_stale   = int(m_stale.group(1)) if m_stale else 0
+        n_unp     = int(m_unp.group(1)) if m_unp else 0
+        if n_patched > 0 or n_stale > 0:
+            blocked.append(pkg)
+            _log(f"[JJK Core Cook] BindWidget gate BLOCKED {pkg} — {status}")
+        elif n_unp > 0:
+            _log(f"[JJK Core Cook] BindWidget gate warning {pkg} — {status}")
+
+    if not blocked:
+        return True, ""
+
+    detail = (
+        "BindWidget headers were auto-patched for:\n"
+        + "\n".join(f"  • {p}" for p in blocked)
+        + "\n\nRebuild FIRST (close the editor → .\\build.ps1, or Ctrl+Alt+F11), "
+          "then run Cook again.\n"
+          "The cook was NOT run — no corrupt pak was produced."
+    )
+    return False, detail
 
 
 def cook_modded_game_assets() -> None:
@@ -2408,6 +2497,12 @@ def cook_modded_game_assets() -> None:
             continue
 
         try:
+            proceed, gate_detail = _ensure_widget_bindings_for_packages(package_paths)
+            if not proceed:
+                errors.append(f"{mod_name}: BindWidget headers auto-patched — rebuild required (cook skipped)")
+                _log(f"[JJK Core Cook] ✗ {mod_name}: cook SKIPPED — no corrupt pak produced.\n{gate_detail}")
+                continue
+
             rc = _cook_core_packages_for_mod(mod_name, package_paths)
             if rc > 1:
                 errors.append(f"{mod_name}: cook failed (exit {rc})")
@@ -2415,7 +2510,7 @@ def cook_modded_game_assets() -> None:
 
             staged = _stage_core_packages(mod_name, package_paths)
             if staged <= 0:
-                errors.append(f"{mod_name}: staging failed")
+                errors.append(f"{mod_name}: staging failed (see Output Log - cooked-asset guard may have refused a package)")
             else:
                 total_staged += staged
                 _log(f"[JJK Core Cook] ✓ {mod_name}: staged {staged} file(s)")
@@ -2482,6 +2577,39 @@ def cook_modded_game_assets_async() -> None:
             _log("[JJK Core Cook] No core packages configured.")
         return
 
+    # Game-thread gate (must run BEFORE the worker thread — unreal API).
+    # Auto-repairs BindWidget headers; fail fast when a rebuild is pending so
+    # no corrupt pak is ever produced. Steady state (post-rebuild) is silent.
+    _blocked_details: list = []
+    for _entry in entries:
+        _mpaths = (_entry or {}).get("package_paths") or []
+        _proceed, _detail = _ensure_widget_bindings_for_packages(_mpaths)
+        if not _proceed:
+            _blocked_details.append((_entry.get("mod_name", "?"), _detail))
+    if _blocked_details:
+        _summary = "\n\n".join(f"{name}:\n{det}" for name, det in _blocked_details)
+        _jjk_notify(
+            "[JJK Core Cook] Cook NOT started — BindWidget headers were auto-patched. "
+            "Rebuild first (build.ps1 / Ctrl+Alt+F11), then cook again.",
+            False,
+        )
+        _log(f"[JJK Core Cook] Cook aborted (rebuild required):\n{_summary}")
+        try:
+            import unreal
+            unreal.EditorDialog.show_message(
+                title        = "Cook Blocked — Rebuild Required",
+                message      = (
+                    "BindWidget headers were auto-patched (no cook was run, "
+                    "no corrupt pak produced).\n\n"
+                    f"{_summary}"
+                ),
+                message_type  = unreal.AppMsgType.OK,
+                default_value = unreal.AppReturnType.OK,
+            )
+        except Exception:
+            pass
+        return
+
     keep_temp = _keep_temp_build_folders_enabled()
     _log(f"[JJK Core Cook] Cook Modded Game Assets: Keep Temp Build Folders = {keep_temp}")
     state["running"] = True
@@ -2512,7 +2640,7 @@ def cook_modded_game_assets_async() -> None:
 
                     staged = _stage_core_packages(mod_name, package_paths)
                     if staged <= 0:
-                        errors.append(f"{mod_name}: staging failed")
+                        errors.append(f"{mod_name}: staging failed (see Output Log - cooked-asset guard may have refused a package)")
                     else:
                         total_staged += staged
                         _log(f"[JJK Core Cook] ✓ {mod_name}: staged {staged} file(s)")

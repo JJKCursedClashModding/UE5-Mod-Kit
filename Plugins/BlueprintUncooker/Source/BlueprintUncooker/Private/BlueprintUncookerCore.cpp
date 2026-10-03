@@ -12,6 +12,7 @@
 #include "Engine/DynamicBlueprintBinding.h"
 #include "Components/ActorComponent.h"
 #include "Blueprint/WidgetBlueprintGeneratedClass.h"
+#include "Blueprint/WidgetTree.h"
 #include "Extensions/WidgetBlueprintGeneratedClassExtension.h"
 #include "Animation/WidgetAnimation.h"
 #include "Components/Widget.h"
@@ -21,10 +22,127 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 
 #include "Misc/PackageName.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "HAL/FileManager.h"
 #include "UObject/SavePackage.h"
 #include "UObject/LinkerLoad.h"
 
 DEFINE_LOG_CATEGORY(LogBlueprintUncooker);
+
+// ---------------------------------------------------------------------------
+// Cooked evaluation-template baseline capture
+// ---------------------------------------------------------------------------
+// FEditor round-trips drop MovieScene compiled data, and the modkit's reconstructed custom
+// sequencer tracks cannot regenerate their evaluation templates (see
+// Saved/uncooker_investigation_report.md, findings F2/F3). Capture the template struct literals of
+// the cooked source here so Content/Python/cooked_asset_guard.py can fail the next core cook if
+// they disappear from the staged package.
+
+namespace
+{
+	/** Collect every '/Script/<module>.<...>Evaluate' template literal in raw package bytes. */
+	static void ExtractEvalTemplateLiterals(const TArray<uint8>& Data, TSet<FString>& OutLiterals)
+	{
+		static const ANSICHAR Needle[] = "/Script/";
+		constexpr int32 NeedleLen = 8;
+
+		for (int32 Index = 0; Index + NeedleLen <= Data.Num(); ++Index)
+		{
+			if (FMemory::Memcmp(&Data[Index], Needle, NeedleLen) != 0)
+			{
+				continue;
+			}
+
+			int32 End = Index + NeedleLen;
+			while (End < Data.Num())
+			{
+				const uint8 C = Data[End];
+				const bool bIdentifierChar =
+					(C >= 'A' && C <= 'Z') || (C >= 'a' && C <= 'z') ||
+					(C >= '0' && C <= '9') || C == '_' || C == '.' || C == '/';
+				if (!bIdentifierChar)
+				{
+					break;
+				}
+				++End;
+			}
+
+			FString Literal = FString(End - Index, reinterpret_cast<const ANSICHAR*>(&Data[Index]));
+			if (Literal.EndsWith(TEXT("Evaluate"), ESearchCase::CaseSensitive))
+			{
+				OutLiterals.Add(MoveTemp(Literal));
+			}
+
+			Index = End - 1;
+		}
+	}
+
+	static FString BaselinePackageKey(const FString& PackageName)
+	{
+		FString Safe = PackageName;
+		Safe.ReplaceInline(TEXT("/"), TEXT("__"));
+		Safe.ReplaceInline(TEXT("."), TEXT("_"));
+		return Safe;
+	}
+
+	/** Write Saved/AssetBaselines/<package>.txt from a cooked source package (no-op for editor assets). */
+	static void CaptureCookedEvalBaseline(const FString& SourceAssetPath)
+	{
+		FString PackageName = SourceAssetPath;
+		int32 DotIdx = INDEX_NONE;
+		if (PackageName.FindChar(TEXT('.'), DotIdx))
+		{
+			PackageName = PackageName.Left(DotIdx);
+		}
+
+		FString AssetFilename;
+		if (!FPackageName::TryConvertLongPackageNameToFilename(
+				PackageName, AssetFilename, FPackageName::GetAssetPackageExtension()))
+		{
+			return;
+		}
+		if (!IFileManager::Get().FileExists(*AssetFilename))
+		{
+			return;
+		}
+
+		TArray<uint8> Data;
+		if (!FFileHelper::LoadFileToArray(Data, *AssetFilename))
+		{
+			return;
+		}
+
+		const FString ExpFilename = FPaths::ChangeExtension(AssetFilename, TEXT("uexp"));
+		TArray<uint8> ExpData;
+		if (FFileHelper::LoadFileToArray(ExpData, *ExpFilename))
+		{
+			Data.Append(ExpData);
+		}
+
+		TSet<FString> Literals;
+		ExtractEvalTemplateLiterals(Data, Literals);
+		if (Literals.Num() == 0)
+		{
+			return;
+		}
+
+		const FString BaselineDir = FPaths::ProjectSavedDir() / TEXT("AssetBaselines");
+		const FString BaselineFile = BaselineDir / (BaselinePackageKey(PackageName) + TEXT(".txt"));
+
+		TArray<FString> Sorted = Literals.Array();
+		Sorted.Sort();
+		const FString Text = FString::Join(Sorted, LINE_TERMINATOR) + LINE_TERMINATOR;
+
+		IFileManager::Get().MakeDirectory(*BaselineDir, true);
+		if (FFileHelper::SaveStringToFile(Text, *BaselineFile))
+		{
+			UE_LOG(LogBlueprintUncooker, Log,
+				TEXT("[BPUncooker] Captured %d evaluation-template baseline literal(s) for '%s' -> %s"),
+				Sorted.Num(), *PackageName, *BaselineFile);
+		}
+	}
+}
 
 // ---------------------------------------------------------------------------
 // ResolveClassFromPath
@@ -203,6 +321,9 @@ FBlueprintUncookResult FBlueprintUncookerCore::Uncook(
 {
 	FBlueprintUncookResult Result;
 
+	// Capture the cooked source's evaluation-template literals before anything can modify it.
+	CaptureCookedEvalBaseline(SourceAssetPath);
+
 	UBlueprintGeneratedClass* BPGC = ResolveClassFromPath(SourceAssetPath);
 	if (!BPGC)
 	{
@@ -220,6 +341,28 @@ FBlueprintUncookResult FBlueprintUncookerCore::Uncook(
 	FString AssetName = FPackageName::GetLongPackageAssetName(ResolvedOutput);
 
 	UE_LOG(LogBlueprintUncooker, Log, TEXT("Output path: %s"), *ResolvedOutput);
+
+	// Refuse in-place uncook. CreateBlueprint would create a class whose name collides with the
+	// still-loaded cooked class in the same package and fatal with FDuplicateDataReader Overread
+	// (SerializedObject = ...REINST_<Name>_C). Callers should use the default <Package>/Uncooked/ path.
+	{
+		FString SourcePackage = SourceAssetPath;
+		int32 SourceDotIdx = INDEX_NONE;
+		if (SourcePackage.FindChar(TEXT('.'), SourceDotIdx))
+		{
+			SourcePackage = SourcePackage.Left(SourceDotIdx);
+		}
+		if (ResolvedOutput == SourcePackage)
+		{
+			const FString SuggestedOutput =
+				FPackageName::GetLongPackagePath(SourcePackage) / TEXT("Uncooked") / AssetName;
+			Result.Message = FString::Printf(
+				TEXT("ERROR: In-place uncook is not supported (output '%s' is the source package). ")
+				TEXT("Pass an explicit OutputPath, e.g. '%s'."),
+				*ResolvedOutput, *SuggestedOutput);
+			return Result;
+		}
+	}
 
 	if (UPackage* OldPkg = FindPackage(nullptr, *ResolvedOutput))
 	{
@@ -441,6 +584,26 @@ FBlueprintUncookResult FBlueprintUncookerCore::Uncook(
 			}
 			else
 			{
+				// Names of widgets actually present in the rebuilt tree. Tree-bound
+				// C++ properties are skipped below (RebindWidgetPropertiesFromTree
+				// rewires them post-compile); native-only instanced subobjects fall
+				// through to the normal copy so their CDO defaults survive the
+				// uncook instead of being silently nulled.
+				TSet<FName> TreeWidgetNames;
+				if (OrigWBPGC)
+				{
+					if (UWidgetBlueprint* NewWBP = Cast<UWidgetBlueprint>(NewBP))
+					{
+						if (UWidgetTree* NewTree = NewWBP->WidgetTree)
+						{
+							NewTree->ForEachWidget([&TreeWidgetNames](UWidget* W)
+							{
+								if (W) TreeWidgetNames.Add(W->GetFName());
+							});
+						}
+					}
+				}
+
 				int32 PropsCopied = 0;
 				for (TFieldIterator<FProperty> PropIt(BPGC, EFieldIteratorFlags::IncludeSuper);
 					PropIt; ++PropIt)
@@ -459,8 +622,11 @@ FBlueprintUncookResult FBlueprintUncookerCore::Uncook(
 
 						if (OrigWBPGC && ObjProp->PropertyClass &&
 							(ObjProp->PropertyClass->IsChildOf(UWidget::StaticClass()) ||
-							 ObjProp->PropertyClass->IsChildOf(UWidgetAnimation::StaticClass())))
+							 ObjProp->PropertyClass->IsChildOf(UWidgetAnimation::StaticClass())) &&
+							TreeWidgetNames.Contains(OrigProp->GetFName()))
 						{
+							// Tree-bound widget: skipped here, rewired from the
+							// duplicated tree by RebindWidgetPropertiesFromTree.
 							continue;
 						}
 					}

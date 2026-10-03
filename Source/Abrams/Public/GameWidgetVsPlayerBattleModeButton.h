@@ -10,10 +10,10 @@ class ABRAMS_API UGameWidgetVsPlayerBattleModeButton : public UGameWidgetButton 
     GENERATED_BODY()
 public:
 protected:
-    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true))
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true, BindWidget))
     UGameVsPlayerBattleModeAnimationWidget* AnimationWidget_A;
     
-    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true))
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true, BindWidget))
     UGameVsPlayerBattleModeAnimationWidget* AnimationWidget_B;
     
 public:

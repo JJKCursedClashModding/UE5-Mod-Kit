@@ -10,7 +10,7 @@ class ABRAMS_API UGameCollectionSoundWidget : public UGameCollectionModeWidgetBa
     GENERATED_BODY()
 public:
 protected:
-    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true))
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true, BindWidget))
     UGameCollectionSoundListViewWidget* BgmListViewWidget;
     
 public:

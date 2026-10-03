@@ -10,10 +10,10 @@ class ABRAMS_API UGameCollectionPlayRecordSimpleWidget : public UGameWidgetBase 
     GENERATED_BODY()
 public:
 protected:
-    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true))
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true, BindWidget))
     UGameCollectionPlayRecordTopWinRateWidget* TopWinRatePvPWidget;
     
-    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true))
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Instanced, meta=(AllowPrivateAccess=true, BindWidget))
     UGameCollectionPlayRecordTopWinRateWidget* TopWinRatePvEWidget;
     
 public:
